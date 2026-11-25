@@ -10,6 +10,18 @@ The orchestrator MUST run through AgentRunner and an adapter and MUST be the sol
 
 ## ADDED Requirements
 
+### Requirement: Lead Agent SHALL retain its direct execution tools
+
+Lead runs MUST use the agent's configured tools, and the built-in lead MUST have workspace and artifact tools by default. Delegation MUST be added when eligible workers exist.
+
+#### Scenario: User asks the built-in lead to create a file in a single chat
+- **WHEN** the lead starts with no available workers
+- **THEN** the lead can use its normal workspace tools under the conversation's write approval policy.
+
+#### Scenario: User configures the lead's tools
+- **WHEN** the lead starts in a group with available workers
+- **THEN** it receives the configured tools and the delegation tool.
+
 ### Requirement: Lead Agent SHALL obtain approval for each delegation
 
 The lead MUST supply a valid individual assignment and obtain user approval before launching its child run.
