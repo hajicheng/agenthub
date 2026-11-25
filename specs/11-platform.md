@@ -25,7 +25,7 @@ export function currentPlatform(): Platform {
 | Platform | 命令 | 参数 | 说明 |
 |---|---|---|---|
 | `posix` | 用户 login shell（`zsh` / `bash`）优先，回退 `sh` | `['-l', '-i', '-c', command]` 或 `['-c', command]` | macOS / Linux 默认优先继承用户 shell 初始化出的 PATH |
-| `windows` | `powershell.exe` | `['-NoProfile', '-NonInteractive', '-Command', '<chcp> ; <command>']` | 用系统自带 PS 5.1（不依赖 pwsh 7） |
+| `windows` | `powershell.exe` | `['-NoProfile', '-NonInteractive', '-Command', '<UTF-8 设置> ; <command>']` | 用系统自带 PowerShell 5.1 |
 
 **POSIX 细节**：
 - 优先从 `process.env.SHELL` 解析用户 shell；缺失时回退 `os.userInfo().shell`
@@ -35,7 +35,8 @@ export function currentPlatform(): Platform {
 
 **Windows 细节**：
 - 子进程启动选项加 `windowsHide: true`，避免闪现控制台
-- 命令前 prepend `$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); ` 强制 stdout / stderr 为 UTF-8（Windows 默认 codepage 936 / cp1252 会导致中文乱码 / LLM 上下文污染）。**不**用 `chcp 65001`——chcp 在 PowerShell 初始化输出流之后才生效，命令本身的错误信息仍是 GBK
+- 命令前设置 `$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new();`，以 UTF-8 读取 PowerShell 输出。
+- FastAPI 后端通过工作线程启动 Windows 命令，兼容 Uvicorn 热重载使用的 Selector 事件循环。工具说明使用 PowerShell 5.1 语法，条件执行可用 `if ($?)`，原生命令的退出码可用 `$LASTEXITCODE`。
 - 用系统自带 PS 5.1（不依赖 pwsh 7）
 
 **Why PowerShell 不用 `cmd.exe`**：cmd 语法贫瘠（无管道、变量插值能力差），LLM 生成质量低；PowerShell 5.1 在所有 Win10+ 系统预装，无需用户额外配置。
