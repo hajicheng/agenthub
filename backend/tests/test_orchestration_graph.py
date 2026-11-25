@@ -14,10 +14,12 @@ from openai.types import CompletionUsage
 
 from app.adapters import custom_adapter
 from app.adapters.registry import adapter_registry
+from app.db.bootstrap import bootstrap_database
 from app.db.client import db_tx
 from app.ids import new_message_id
 from app.main import app
 from app.services.event_bus import event_bus
+from app.services.fs_service import get_workspace_for_conversation
 
 
 def assignment(agent_id, task):
@@ -45,7 +47,10 @@ class Model:
             SimpleNamespace(
                 index=index,
                 id=f"call-{len(self.requests)}-{index}",
-                function=SimpleNamespace(name="delegate_task", arguments=json.dumps(args)),
+                function=SimpleNamespace(
+                    name=args.get("toolName", "delegate_task"),
+                    arguments=json.dumps(args.get("args", args)),
+                ),
             )
             for index, args in enumerate(response if isinstance(response, list) else [])
         ]
@@ -145,6 +150,62 @@ async def review(client, url, pending, action, feedback=None):
         body["feedback"] = feedback
     response = await client.post(f"{url}/pending-dispatch-plans/{pending['id']}", json=body)
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(("mode", "legacy_tool"), [
+    ("single", "plan_tasks"),
+    ("single", "delegate_task"),
+    ("group", None),
+])
+@pytest.mark.asyncio
+async def test_lead_can_use_its_workspace_tools_in_review_mode(group, monkeypatch, mode, legacy_tool):
+    client, url, events = group
+    if legacy_tool:
+        with db_tx() as conn:
+            conn.execute(
+                "UPDATE agents SET tool_names = ? WHERE id = 'ag_orchestrator'",
+                (json.dumps([legacy_tool, "ask_user", "fs_list", "fs_read", "read_attachment", "read_artifact"]),),
+            )
+            bootstrap_database(conn)
+    if mode == "single":
+        created = await client.post(
+            "/api/conversations", json={"mode": "single", "agentIds": ["ag_orchestrator"]},
+        )
+        assert created.status_code == 201
+        url = f"/api/conversations/{created.json()['conversation']['id']}"
+    model, worker = install_adapters(monkeypatch, [
+        [{"toolName": "fs_write", "args": {"path": "demo.html", "content": "<h1>Demo</h1>"}}],
+        "Created demo.html",
+    ])
+    run_id = (await send(client, url))["runIds"][0]
+    pending = (await next_event(events, "fs_write.pending"))["pendingWrite"]
+    workspace = get_workspace_for_conversation(pending["conversationId"])
+    target = Path(workspace["rootPath"]) / "demo.html"
+    assert pending["runId"] == run_id
+    assert not target.exists()
+    approved = await client.post(f"{url}/pending-writes/{pending['id']}", json={"action": "approve"})
+    assert approved.status_code == 200
+    assert (await next_event(events, "run.end", runId=run_id))["status"] == "complete"
+    assert target.read_text(encoding="utf-8") == "<h1>Demo</h1>"
+    assert worker.inputs == []
+    names = {tool["function"]["name"] for tool in model.requests[0]["tools"]}
+    assert {"fs_write", "bash", "write_artifact", "deploy_workspace", "deploy_artifact"} <= names
+    assert ("delegate_task" in names) == (mode == "group")
+
+
+@pytest.mark.asyncio
+async def test_lead_keeps_custom_tool_selection_when_delegation_is_available(group, monkeypatch):
+    client, url, events = group
+    with db_tx() as conn:
+        conn.execute(
+            "UPDATE agents SET tool_names = ? WHERE id = 'ag_orchestrator'",
+            (json.dumps(["fs_list"]),),
+        )
+        bootstrap_database(conn)
+    model, _ = install_adapters(monkeypatch, ["Done"])
+    run_id = (await send(client, url))["runIds"][0]
+    assert (await next_event(events, "run.end", runId=run_id))["status"] == "complete"
+    assert {tool["function"]["name"] for tool in model.requests[0]["tools"]} == {"fs_list", "delegate_task"}
 
 
 @pytest.mark.asyncio

@@ -77,7 +77,7 @@ class CustomAgentAdapter:
         api_key, base_url = _resolve_client_config(inp.model_provider, inp.api_key, inp.api_base_url)
         client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
 
-        tool_defs = tool_registry.resolve(inp.tool_names)
+        tool_defs = tool_registry.resolve(inp.tool_names, can_delegate=inp.delegate_task is not None)
         api_tools = [
             {
                 "type": "function",

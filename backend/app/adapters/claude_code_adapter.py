@@ -15,7 +15,7 @@ from app.observability import trace_step
 from app.services.artifact_service import get_artifact
 from app.services.settings_service import get_effective_anthropic_base_url, get_effective_api_key
 from app.tools.registry import tool_registry
-from app.tools.types import ToolContext
+from app.tools.types import WORKSPACE_TOOL_NAMES, ToolContext
 
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-20250514"
 MAX_TURNS = 10
@@ -40,20 +40,8 @@ class ClaudeCodeAdapter:
             client_kwargs["base_url"] = base_url
         client = AsyncAnthropic(**client_kwargs)
 
-        # Default tool set for claude-code agents
-        requested_tools = inp.tool_names or [
-            "write_artifact",
-            "read_artifact",
-            "deploy_artifact",
-            "deploy_workspace",
-            "read_attachment",
-            "fs_list",
-            "fs_read",
-            "fs_write",
-            "bash",
-            "ask_user",
-        ]
-        tool_defs = tool_registry.resolve(requested_tools)
+        requested_tools = inp.tool_names or list(WORKSPACE_TOOL_NAMES)
+        tool_defs = tool_registry.resolve(requested_tools, can_delegate=inp.delegate_task is not None)
         anthropic_tools = [
             {
                 "name": t.name,

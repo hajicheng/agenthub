@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 from app.db.builtin_agents import get_builtin_agents
+from app.tools.types import WORKSPACE_TOOL_NAMES
 
 DDL: list[str] = [
     """CREATE TABLE IF NOT EXISTS agents (
@@ -227,4 +228,18 @@ def bootstrap_database(conn: sqlite3.Connection) -> None:
                 for a in builtins
             ],
         )
+    legacy_lead = conn.execute(
+        "SELECT tool_names FROM agents WHERE id = 'ag_orchestrator' AND is_builtin = 1 AND is_orchestrator = 1"
+    ).fetchone()
+    if legacy_lead:
+        try:
+            saved_tools = json.loads(legacy_lead[0])
+        except json.JSONDecodeError:
+            saved_tools = None
+        legacy_read_tools = ["ask_user", "fs_list", "fs_read", "read_attachment", "read_artifact"]
+        if saved_tools in (["plan_tasks", *legacy_read_tools], ["delegate_task", *legacy_read_tools]):
+            conn.execute(
+                "UPDATE agents SET tool_names = ? WHERE id = 'ag_orchestrator'",
+                (json.dumps(WORKSPACE_TOOL_NAMES),),
+            )
     conn.commit()

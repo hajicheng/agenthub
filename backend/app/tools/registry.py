@@ -482,8 +482,11 @@ class ToolRegistry:
         for d in defs:
             self._tools[d.name] = d
 
-    def resolve(self, names: list[str]) -> list[ToolDefinition]:
-        return [self._tools[n] for n in names if n in self._tools]
+    def resolve(self, names: list[str], *, can_delegate: bool = False) -> list[ToolDefinition]:
+        tools = [self._tools[name] for name in names if name in self._tools and name != "delegate_task"]
+        if can_delegate:
+            tools.append(self._tools["delegate_task"])
+        return tools
 
     async def execute(self, name: str, args: Any, ctx: ToolContext) -> ToolResult:
         tool = self._tools.get(name)

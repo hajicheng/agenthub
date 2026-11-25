@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 
+WORKSPACE_TOOL_NAMES = (
+    "write_artifact", "read_artifact", "deploy_artifact", "deploy_workspace",
+    "read_attachment", "fs_list", "fs_read", "fs_write", "bash", "ask_user",
+)
+
+
 @dataclass
 class ToolContext:
     conversation_id: str

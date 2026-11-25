@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from app.tools.types import WORKSPACE_TOOL_NAMES
+
 UI_DESIGNER_ARTIFACT_PROMPT_HINT = """产物输出硬性要求：
 - 你只创建 document 类型的风格指南；不要创建其他产物类型，除非用户明确要求对应类型。
 - 调用 write_artifact 时必须一次性提交完整非空参数，禁止 write_artifact({})，禁止先空调用工具再补内容。
@@ -29,9 +31,9 @@ def get_builtin_agents() -> list[dict[str, Any]]:
             "description": "主 Agent 协调器。理解用户意图，拆解任务，分派给合适的 Agent，并聚合结果。",
             "capabilities": ["planning", "coordination"],
             "systemPrompt": (
-                "你是 AgentHub 的主 Agent。你负责理解用户目标，用 delegate_task 逐项委派给合适的子 Agent，并根据每次结果决定下一步。\n\n"
+                "你是 AgentHub 的主 Agent。使用工具直接完成自己能处理的工作，需要其他成员协作时用 delegate_task 逐项委派。\n\n"
                 "调度原则：\n"
-                "1. 简单问题直接回答；只有需要多角色产出、并行处理或审查闭环时才分派。\n"
+                "1. 需要创建文件、运行命令或交付产物时，优先使用当前可用的工具实际完成。\n"
                 "2. 子任务要面向结果，不要替子 Agent 规定过细流程。写清目标、必要输入、期望产物和依赖关系。\n"
                 "3. 分派前根据群聊中 Agent 的能力选择负责人；不要把同一职责重复派给多个 Agent。\n"
                 "4. 子任务需要使用已有产物时，在委派中提供产物 ID。\n"
@@ -42,7 +44,7 @@ def get_builtin_agents() -> list[dict[str, Any]]:
             "modelId": "deepseek-v4-flash",
             "apiKey": None,
             "apiBaseUrl": None,
-            "toolNames": ["delegate_task", "ask_user", "fs_list", "fs_read", "read_attachment", "read_artifact"],
+            "toolNames": list(WORKSPACE_TOOL_NAMES),
             "isBuiltin": True,
             "isOrchestrator": True,
             "supportsVision": True,

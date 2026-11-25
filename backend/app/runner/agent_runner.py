@@ -270,11 +270,10 @@ class AgentRunner:
         attachments: list[AdapterAttachment],
         observation: Observation,
         override_system_prompt: str | None = None,
-        override_tool_names: list[str] | None = None,
         parent_run_id: str | None = None,
         delegate_task: DelegationHandler | None = None,
     ) -> dict[str, Any]:
-        tool_names = override_tool_names if override_tool_names is not None else [
+        tool_names = [
             name for name in agent["toolNames"] if name not in ("plan_tasks", "delegate_task")
         ]
         adapter = adapter_registry.get_adapter(agent)
@@ -324,13 +323,15 @@ class AgentRunner:
         )
         system_prompt = (
             agent["systemPrompt"].replace("plan_tasks", "delegate_task")
-            + "\n\nYou are the only agent replying directly to the user. For a complex request, "
-            "delegate one self-contained assignment at a time with delegate_task. Wait for its result "
-            "and use it to decide what to do next. Consider the user's approval, rejection or revision "
-            "before requesting another assignment. Provide artifactIds when a worker needs existing artifacts. "
-            "Explain the final outcome yourself.\n\nAvailable workers:\n"
-            + (roster or "(none)")
+            + "\n\nYou reply directly to the user. Use your available workspace and artifact tools "
+            "to carry out the request yourself whenever you can, including when no workers are available."
         )
+        if workers:
+            system_prompt += (
+                "\n\nWhen a worker can help, delegate one self-contained assignment at a time with delegate_task. "
+                "Use each result and any approval feedback to decide what to do next. "
+                "Provide artifactIds when a worker needs existing artifacts.\n\nAvailable workers:\n" + roster
+            )
 
         async def delegate(args: dict[str, Any], message_id: str) -> ToolResult:
             try:
@@ -372,9 +373,6 @@ class AgentRunner:
             )
             return ToolResult(ok=True, value=state["result"])
 
-        tool_names = ["ask_user", "fs_list", "fs_read", "read_artifact", "read_attachment"]
-        if workers:
-            tool_names.append("delegate_task")
         await self._execute_simple_run(
             run_id=run_id,
             abort_event=abort_event,
@@ -386,7 +384,6 @@ class AgentRunner:
             attachments=attachments,
             observation=observation,
             override_system_prompt=system_prompt,
-            override_tool_names=tool_names,
             delegate_task=delegate if workers else None,
         )
 
