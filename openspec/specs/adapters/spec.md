@@ -6,6 +6,15 @@ Defines the AgentPlatformAdapter contract and provider-specific boundaries. Deta
 
 ## Requirements
 
+### Requirement: Chat adapters SHALL provide current local time
+
+The backend SHALL supply the current host date, time, and UTC offset to chat models for each model request.
+
+#### Scenario: A user asks for the current time
+
+- **WHEN** an agent receives a question about the current time
+- **THEN** the model receives a fresh local timestamp as system context.
+
 ### Requirement: Adapters SHALL translate provider output to StreamEvent
 
 Each adapter MUST expose `stream(input, signal)` and yield only AgentHub `StreamEvent` objects to the application layer.

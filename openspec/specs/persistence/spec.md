@@ -15,6 +15,12 @@ The SQLite schema MUST persist agents, conversations, messages, artifacts, works
 - **THEN** a workspace row is created or associated
 - **AND** messages and runs can reference the conversation id.
 
+#### Scenario: A sandbox path points to a previous installation
+
+- **WHEN** a persisted sandbox directory is missing at startup
+- **THEN** the backend restores its path under the current managed workspace directory
+- **AND** it reuses existing files at that location.
+
 ### Requirement: JSON columns SHALL store typed unions
 
 JSON columns such as `messages.parts`, `artifacts.content`, and usage payloads MUST correspond to TypeScript union types in shared code.
