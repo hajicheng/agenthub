@@ -29,10 +29,11 @@ OpenSpec capability specs under `openspec/specs/` are the concise, testable cont
 
 - Next.js 16 App Router + React 19
 - TypeScript strict mode
-- SQLite + Drizzle + `better-sqlite3`
+- FastAPI with Python `sqlite3` for backend persistence
 - SSE for stream transport
+- Python LangGraph for Orchestrator control flow inside the FastAPI AgentRunner
 - Zustand + Immer for client state
-- Adapter SDKs: `@anthropic-ai/claude-agent-sdk`, `@openai/codex-sdk`, `openai`
+- Python adapter SDKs include `anthropic` and `openai`
 - Desktop shell: Electron 33
 
 ## Rules

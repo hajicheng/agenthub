@@ -39,7 +39,7 @@ type ModelProvider = 'anthropic' | 'openai' | 'deepseek' | 'volcano-ark' | 'open
 ```
 
 **约束**：
-- `isOrchestrator: true` 的 Agent 必须 `toolNames.includes('plan_tasks')`（早期 spec 用过 `dispatch_to_agent` 命名，已统一为 `plan_tasks`，详见 Spec 07）
+- 群聊的 `isOrchestrator: true` 成员接收用户请求，由 AgentRunner 注入 `delegate_task`（详见 Spec 07）。
 - `adapterName === 'custom'` 时 `modelProvider` 和 `modelId` 必填
 - `modelProvider === 'openai-compatible'` 时 `apiKey` 与 `apiBaseUrl` 必填；`apiBaseUrl` 必须是 OpenAI Chat Completions 兼容 endpoint（例如通义千问 compatible-mode、智谱、MiniMax、OpenRouter、SiliconFlow 等兼容地址）
 - `adapterName === 'claude-code'` 时 `modelProvider` 忽略；`modelId` 可选（默认走 SDK 默认模型 `claude-opus-4-7`）；`toolNames` 强制 `[]`（Claude Code 用 SDK 内置工具集，详见 Spec 07）
@@ -98,7 +98,7 @@ interface Message {
 
   status: 'streaming' | 'complete' | 'error' | 'aborted'
   parentMessageId?: string      // 回复 / 引用关系
-  mentionedAgentIds: string[]   // 用户 @ 提及的 Agent
+  mentionedAgentIds: string[]   // 历史提及元数据
 
   runId?: string                // role === 'agent' 时，由哪个 AgentRun 产生
   createdAt: number

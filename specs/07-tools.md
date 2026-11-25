@@ -74,7 +74,7 @@ export const toolRegistry = buildRegistry()
 | `read_artifact` | 读已有产物的完整内容 | 读 DB | 跨任务复用产物的 agent（Orchestrator 派的子 agent 常用） |
 | `read_attachment` | 读用户上传附件 | 读文件系统 | 处理用户文档 / 文本附件的 agent |
 | `ask_user` | 向用户发起结构化选择题 | 等待用户回答（in-memory pending） | 需要澄清范围 / 风格 / 平台 / 风险选择的 agent |
-| `plan_tasks` | Orchestrator 拆解子任务 | 无（输出端工具） | **仅 Orchestrator** |
+| `delegate_task` | 申请并执行单项委派 | 经审批启动子 Run | **仅主 Agent** |
 | `report_task_result` | 子任务上报最终语义结果 | 无（输出端工具） | Orchestrator 派发的子 agent（AgentRunner 自动注入） |
 | `fs_read` | 读 workspace 内文本文件 | 读文件系统 | 需要看用户项目代码的 agent |
 | `fs_write` | 写 workspace 内文本文件 | 写文件系统 | 需要生成 / 修改文件的 agent |
@@ -219,43 +219,13 @@ write_artifact({
 **装备与注入**：
 - Custom agent 只有 `toolNames` 包含 `ask_user` 才能调用；内置 agents 与新建自定义 agent 默认装备。
 - Claude Code / Codex adapter 通过 AgentHub MCP 暴露 `ask_user`，不依赖 `Agent.toolNames`。
-- Orchestrator 计划阶段会强制注入 `ask_user`，用于关键歧义澄清；聚合阶段不带该工具，避免最终总结前再次打断用户。
+- 主 Agent 可以使用 `ask_user` 澄清关键需求。
 
-### plan_tasks
+### delegate_task
 
-源文件：`src/server/tools/plan-tasks.ts`
+参数为 `agentId`、`task` 和可选的 `artifactIds`。成员须在当前会话的可用子 Agent 中，产物须属于本会话。审批通过后运行子 Agent，随后把状态、摘要、错误和产物 ID 作为工具结果返回给主 Agent。
 
-**特殊**：这是「输出端工具」—— handler 仅校验参数并返回 `{ acknowledged: true, taskCount }`，**真正的副作用（拆分子 run、DAG 调度）在 AgentRunner 里**（见 Spec 06）。
-
-**参数**：
-```typescript
-{
-  reasoning: string         // 拆分理由，3 句以内
-  tasks: Array<{
-    id: string              // 't1' / 't2' / 't3'...
-    agentId: string         // 群里现有 agent id
-    task: string            // 给该子 agent 的完整指令（自包含，子 agent 看不到群聊历史）
-    dependsOn?: string[]    // 前置任务 id，省略 = 可立即开始
-    expectedOutputs?: Array<{
-      id: string            // 真实 artifact 输出的符号 key，不是 artifact id
-      type: 'web_app' | 'document' | 'image' | 'ppt'
-      required?: boolean    // 默认 true；用于标记交接意图，不直接决定任务状态
-      description?: string
-    }>
-    inputs?: Array<{
-      fromTaskId: string
-      outputId: string
-      required?: boolean    // 默认 true；required 输入缺失会让任务 skipped
-      description?: string
-    }>
-    acceptanceCriteria?: string[] // 非产物型任务的完成条件提示
-  }>
-}
-```
-
-`expectedOutputs` 只用于真实 artifact 交接：下游要读、用户要预览、或任务本身要求写入可独立产物时才声明。审查、验证、诊断、状态检查、解释、总结等文字型任务不要为了“完成状态”声明 `expectedOutputs`；这类任务用 `acceptanceCriteria` 描述完成条件，并由 child agent 通过 `report_task_result.acceptanceResults` 逐项上报。
-
-**装备约束**：只有 `isOrchestrator=true` 的 agent 才应装备 `plan_tasks`（service 层未强制，但前端 UI 不允许给非 Orchestrator agent 勾选）。
+每个模型响应处理一次委派调用。AgentRunner 只在有可用子 Agent 的主 Run 上提供执行回调。工作流详见 Spec 06。
 
 ### report_task_result
 
@@ -535,4 +505,4 @@ AgentHub 额外给 Codex 注入一个 stdio MCP bridge，只暴露 allowlist：`
 
 - Spec 01：定义了 `Agent.toolNames`（引用本 spec 的工具名；Claude Code / Codex agent 强制 `[]`）
 - Spec 05：定义了 `AdapterInput.toolNames`（同上）；说明 Custom / Claude Code / Codex 路径如何分别使用工具
-- Spec 06：`plan_tasks` 工具是 Orchestrator 三阶段工作流的核心
+- Spec 06 描述主 Agent 的逐项委派流程。

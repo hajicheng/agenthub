@@ -144,37 +144,29 @@ message.end       (m1)
 run.end           (r1, 'complete')
 ```
 
-### 场景 B：群聊，Orchestrator 调度 2 个子 Agent 并行
+### 场景 B · 主 Agent 审批并委派一项任务
 
-```
-run.start         (r1, orch)
-message.start     (m1, orch, r1)
-part.start        (m1, 0, { type:'thinking', content:'' })
-part.delta        (...)
-part.end          (m1, 0)
-tool.call         (m1, c1, 'plan_tasks', ...)
-dispatch.plan     (r1, [{ id:'t1', agentId:'pm', ... }, { id:'t2', agentId:'design', dependsOn:['t1'] }])
-tool.result       (m1, c1, ...)
-message.end       (m1)
-
-dispatch.start    (r1, r2, t1, pm)
-  run.start       (r2, pm, parentRunId=r1)
-  message.start   (m2, pm, r2)
+```text
+run.start               (r1, lead)
+message.start           (m1, lead, r1)
+tool.call               (m1, c1, delegate_task)
+dispatch.plan.pending   (pendingPlan.messageId=m1)
+dispatch.plan.resolved  (messageId=m1, approved=true)
+dispatch.plan           (runId=r1, messageId=m1, plan=[assignment])
+dispatch.start          (parentRunId=r1, childRunId=r2, messageId=m1)
+  run.start             (r2, worker, parentRunId=r1)
+  message.start         (m2, worker, r2, parentRunId=r1)
   ...
-  run.end         (r2, 'complete')
-dispatch.end      (parentRunId=r1, childRunId=r2, taskId=t1, status='complete')
-
-dispatch.start    (r1, r3, t2, design)
-  ...
-dispatch.end      (parentRunId=r1, childRunId=r3, taskId=t2, status='complete')
-
-# 聚合
-message.start     (m4, orch, r1)
-part.start        (m4, 0, { type:'text', content:'' })
-part.delta        (...)
-message.end       (m4)
-run.end           (r1, 'complete')
+  run.end               (r2, complete)
+dispatch.end            (parentRunId=r1, childRunId=r2, messageId=m1, status=complete)
+tool.result             (m1, c1, childRunId=r2, summary, artifactIds)
+message.end             (m1)
+message.start           (m3, lead, r1)
+...
+run.end                 (r1, complete)
 ```
+
+委派事件用 `messageId` 区分同一主 Run 的不同任务。子 Agent 的 `message.start` 提供 `parentRunId`，供前端将它归入任务详情。
 
 若某任务因上游失败 / 中止被跳过，不会有 `dispatch.start` / child `run.start`，只发：
 
@@ -237,7 +229,7 @@ dispatch.end      (parentRunId=r1, taskId=t3, status='skipped', error='Upstream 
 | `tool.call` | ✅ 写为 message.parts 里的 tool_use part | |
 | `tool.result` | ✅ 写为 message.parts 里的 tool_result part | run 失败 / 中止时，AgentRunner 会为未配对 `tool_result` 的 `tool_use` 补发 `isError=true` 结果 |
 | `artifact.*` | ✅ 落到 `artifacts` 表 | |
-| `dispatch.*` | ❌ 透传（信息来自 plan_tasks 工具调用 + agent_runs 表） | |
+| `dispatch.*` | ❌ 透传（信息来自逐项委派和子 Run） | |
 | `fs_write.pending` | ❌ 透传 | pending 队列存于内存单例（`src/server/pending-writes.ts`）；dev server 重启丢失，前端 mount 时拉一次兜底 |
 | `fs_write.resolved` | ❌ 透传 | applied=true/false 由前端 store 用来移除对应 pending |
 | `bash_command.pending` | ❌ 透传 | pending 队列存于内存单例（`src/server/pending-bash-commands.ts`）；前端 mount 时拉一次兜底 |

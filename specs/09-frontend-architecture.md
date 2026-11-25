@@ -96,8 +96,8 @@ interface AppState {
 | `artifact.update` | 浅合并 `content` patch（TODO：当前没有 emitter，前端 reducer 已就绪） |
 | `deploy.status` | 不直接改 store；AgentRunner 会补发 `part.start(deploy_status)`，reducer 按普通 part 写入 |
 | `dispatch.plan` | 找该 runId 最新的 agent 消息作挂载点，创建 `DispatchState` |
-| `dispatch.start` | `taskStatus[taskId] = 'running'`，记 `childRunIds[taskId] = childRunId` |
-| `dispatch.end` | 优先通过 `parentRunId` 找 `dispatchesByRunId`，更新 `taskStatus[taskId]` 为 `complete` / `failed` / `aborted` / `skipped`；旧事件可用 `childRunId` 反查兜底 |
+| `dispatch.start` | 用 `parentRunId` 定位调度卡，将 `taskStatus[taskId]` 更新为 `running` |
+| `dispatch.end` | 用 `parentRunId` 定位调度卡，将 `taskStatus[taskId]` 更新为 `complete` / `failed` / `aborted` / `skipped` |
 | `fs_write.pending` | `pendingWritesByConv[convId].push(pendingWrite)`（已存在的 id 不重复 push） |
 | `fs_write.resolved` | 从 `pendingWritesByConv[convId]` 移除 `pendingId`；ChatPanel 的清理 effect 会同步关掉对应 `diff:<pwId>` tab |
 | `bash_command.pending` | `pendingBashCommandsByConv[convId].push(pendingCommand)`（已存在的 id 不重复 push） |
@@ -222,7 +222,7 @@ app/page.tsx
     │   │   │   │   │   └── <AttachmentChip />  ── 附件
     │   │   │   │   └── <DispatchPlanCard />  ── 调度卡片（Orchestrator）
     │   │   │   ├── <PendingWritesPanel>    ── 输入框上方的待审批列表（每条是 PendingWriteCard，含「查看更改」打 diff tab + 应用/拒绝）
-    │   │   │   └── <MessageInput>          ── @mention popup + 附件 + 引用回复 + Auto/Review 切换
+    │   │   │   └── <MessageInput>          ── 主 Agent 输入 + 附件 + 引用回复 + Auto/Review 切换
     │   │   ├── isDiffTabId(activeTab): <PendingWriteDiffTab>   ── 中间区的 fs_write 审批 diff（react-diff-viewer-continued）
     │   │   └── 否则: <FileTab>            ── 文件浏览 / 编辑
     │   └── <PendingWriteApprovalDialog> 已废弃 —— 由 PendingWritesPanel + PendingWriteDiffTab 取代
@@ -309,10 +309,10 @@ app/page.tsx
 `DispatchState` may include:
 
 ```typescript
-reviewStatus?: 'pending' | 'approved' | 'rejected'
+reviewStatus?: 'pending' | 'approved' | 'rejected' | 'revision_requested'
 pendingPlanId?: string
 ```
 
-`dispatch.plan.pending` creates a dispatch card in review mode. `DispatchPlanCard` lets the user edit task text, agent assignment, `dependsOn`, `expectedOutputs`, `inputs`, and `acceptanceCriteria`. The card submits the full edited plan through `POST /api/conversations/:id/pending-dispatch-plans/:planId`.
+`dispatch.plan.pending` attaches single-task review controls to the originating lead message. The card shows the worker and assignment. The composer sends revision feedback to the review endpoint.
 
-`dispatch.plan.resolved` removes the pending marker and records whether the review was approved or rejected. The existing `dispatch.plan` event switches the card into execution progress mode for the approved compiled plan.
+The `messageId` on dispatch events identifies the card. The message parts retain the call and result for reloads. Child messages with `parentRunId` appear inside their task card.
