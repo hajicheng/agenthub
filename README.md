@@ -15,7 +15,7 @@
 
 AgentHub is a local-first multi-agent workspace that turns AI collaboration into an IM-style experience.
 
-Instead of treating every agent run as an isolated terminal transcript, AgentHub organizes work around conversations: agents are contacts, a conversation is a workspace, files and artifacts are shared context, and the Orchestrator can split work across multiple agents.
+AgentHub organizes work around conversations. A conversation has its own workspace, files and artifacts provide shared context, and the Orchestrator delegates work to specialists as needed.
 
 <p align="center">
     <img src="docs/images/agenthub-preview.png" alt="AgentHub multi-agent collaboration and artifact preview" width="100%" />
@@ -34,9 +34,9 @@ Instead of treating every agent run as an isolated terminal transcript, AgentHub
 - [Tech Stack](#tech-stack)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
+  - [Langfuse tracing](#langfuse-tracing)
 - [Desktop App](#desktop-app)
   - [Specify Electron build platform](#specify-electron-build-platform)
-  - [SQLite ABI notes](#sqlite-abi-notes)
 - [Mobile Companion](#mobile-companion)
 - [Common Commands](#common-commands)
 - [Architecture](#architecture)
@@ -64,16 +64,16 @@ AgentHub is built for that workflow. It is local by default, uses SQLite, and ke
 
 ### IM-style agent workspace
 
-- Conversation list, group chats, mentions, unread state, bookmarks, pins, reply quoting, edit-and-resend, withdraw, and regenerate.
-- Messages are structured parts, not one raw markdown blob: text, code, thinking, tool calls, tool results, attachments, artifact refs, deployment cards, and dispatch plans render differently.
+- Conversation list, lead-driven group chats, unread state, bookmarks, pins, reply quoting, edit-and-resend, withdraw, and regenerate.
+- Messages render text, code, tool calls, attachments, artifact references, deployments, and delegation cards as separate parts.
 - Tool calls are visible in the chat stream, including long bash commands and command output.
+- Agent model requests include the host's current local time and UTC offset.
 
 ### Multi-agent support
 
 | Adapter | Use case |
 | --- | --- |
-| Claude Code | Uses `@anthropic-ai/claude-agent-sdk`, with Claude Code tools and session continuation. |
-| Codex | Uses `@openai/codex-sdk`, with isolated AgentHub `CODEX_HOME` / `CODEX_SQLITE_HOME`. |
+| Claude Code | Uses the Anthropic Python SDK and AgentHub's tools. Requires an Anthropic or compatible API key. |
 | Custom Agent | OpenAI Chat Completions-compatible providers such as OpenAI, DeepSeek, Volcano Ark, OpenRouter, SiliconFlow, and other compatible endpoints. |
 | Mock | Local development without spending tokens. |
 
@@ -81,14 +81,7 @@ You can create custom agents in the UI with their own model, provider, system pr
 
 ### Orchestrator and task dispatch
 
-The Orchestrator is a normal agent with extra tools. It can:
-
-- ask structured clarification questions
-- create a task plan
-- wait for plan approval or revision
-- dispatch tasks to child agents
-- track child task completion, failures, blockers, and artifacts
-- aggregate the final answer back into the conversation
+The Orchestrator receives group messages and is the group's direct responder. It can ask clarification questions and propose one assignment at a time. Approve, reject, or request changes from the assignment card in the chat. FastAPI uses LangGraph to run approved assignments and return each worker's result and artifact references to the Orchestrator before it decides what to do next.
 
 ### Workspace, files, and approvals
 
@@ -97,7 +90,7 @@ The Orchestrator is a normal agent with extra tools. It can:
 - Local mode binds a conversation to a real local project directory.
 - `fs_read`, `fs_write`, and `bash` are constrained to the effective workspace directory.
 - Review mode can require approval before file writes.
-- High-risk bash commands can require approval before execution.
+- The command blacklist blocks dangerous shell patterns.
 
 ### Artifacts and deployment previews
 
@@ -126,7 +119,8 @@ For local frontend projects, agents can deploy static output directories such as
 - TypeScript strict mode
 - Tailwind CSS v4 + shadcn/ui
 - Zustand + Immer
-- SQLite + Drizzle + `better-sqlite3`
+- FastAPI with Python's `sqlite3`
+- LangGraph for delegation and approval, with optional Langfuse tracing
 - SSE for live updates
 - Electron 33 for desktop packaging
 - Capacitor for the mobile companion app
@@ -140,12 +134,12 @@ Next.js is pinned to `16.2.6`. If you modify framework-level behavior, read the 
 
 - Node.js 20+
 - pnpm
+- Python 3.11+ and uv
 - macOS or Windows for the desktop app path
 - Xcode and CocoaPods only if you work on the iOS companion app
 
 Optional provider setup:
 
-- Claude Code login for Claude Code adapter OAuth usage
 - API keys for Anthropic, OpenAI, DeepSeek, Volcano Ark, or custom OpenAI-compatible providers
 
 ---
@@ -153,12 +147,13 @@ Optional provider setup:
 ## Quick Start
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
+uv --directory backend sync --locked --extra dev
 
 # Optional
 cp .env.example .env.local
 
-# Run dev
+# Run Next.js and FastAPI
 pnpm dev
 ```
 
@@ -168,7 +163,7 @@ Open:
 http://localhost:3000
 ```
 
-The app auto-creates the SQLite database and seeds the built-in agents on first startup.
+On Windows PowerShell, use `Copy-Item .env.example .env.local` to create the optional config file. The backend creates the SQLite database and seeds the built-in agents on first startup.
 
 You can configure API keys either in `.env.local` or in the app settings panel. Agent-specific keys override global settings.
 
@@ -181,7 +176,20 @@ DEEPSEEK_API_KEY=...
 ARK_API_KEY=...
 ```
 
-Claude Code can also work from an existing local Claude Code login without a separate Anthropic API key.
+### Langfuse tracing
+
+Copy the project keys and region URL from Langfuse into `.env.local` or the FastAPI process environment. This example uses Langfuse Cloud US.
+
+```dotenv
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_BASE_URL=https://us.cloud.langfuse.com
+# LANGFUSE_CAPTURE_CONTENT=true
+```
+
+Restart FastAPI and send a new message. **Tracing** shows the run, model calls, tool execution, delegation reviews, and worker runs with their timings, statuses, and token usage. **Sessions** groups traces by conversation.
+
+Set `LANGFUSE_CAPTURE_CONTENT=true` to include text previews of prompts, replies, tool arguments, and tool results in new observations. Previews redact known credentials and omit binary attachments and private reasoning. Set `LANGFUSE_TRACING_ENABLED=false` to disable export.
 
 ---
 
@@ -232,23 +240,7 @@ pnpm exec electron-builder -m --arm64
 pnpm exec electron-builder -w --x64
 ```
 
-Native modules matter here. `better-sqlite3` is compiled for a specific Node/Electron ABI and CPU architecture. For reliable releases, build on the target OS/architecture or use a CI matrix. Cross-building Windows from macOS may require extra toolchain support such as Wine, and cross-building native modules across CPU architectures is not always reliable.
-
-### SQLite ABI notes
-
-This project flips `better-sqlite3` between Node ABI and Electron ABI depending on the command:
-
-- `pnpm dev`, `pnpm test`, `pnpm e2e`: Node ABI
-- `pnpm build`, `pnpm start`, `pnpm db:*`, packaged Electron app: Electron ABI
-
-The package scripts try to check and rebuild automatically. If you see a native module version error, run one of:
-
-```bash
-pnpm rebuild better-sqlite3
-pnpm electron:rebuild
-```
-
-Then rerun the failed command.
+The desktop frontend uses the same FastAPI backend. Start the backend separately when running the packaged frontend.
 
 ---
 
@@ -277,15 +269,15 @@ The mobile app is designed to connect to a desktop AgentHub host over LAN or Tai
 ## Common Commands
 
 ```bash
-pnpm dev                 # Web dev server
+pnpm dev                 # Next.js and FastAPI development servers
+pnpm backend:dev         # FastAPI development server on port 8000
+pnpm backend:test        # Python backend tests
 pnpm typecheck           # TypeScript check
 pnpm lint                # ESLint
 pnpm test                # Vitest
 pnpm e2e                 # Playwright E2E
-pnpm build               # Next production build under Electron Node ABI
-pnpm start               # Start production server
-pnpm db:push             # Apply Drizzle schema
-pnpm db:seed             # Re-seed built-in agents
+pnpm build               # Next.js production build
+pnpm start               # Start Next.js against a running FastAPI backend
 pnpm electron:dev        # Desktop development mode
 pnpm electron:build      # Desktop package
 ```
@@ -321,10 +313,10 @@ L3 Application Services
   AgentRunner, ConversationService, EventBus, ToolExecutor
 
 L2 Agent Platform Adapters
-  Claude Code, Codex, Custom OpenAI-compatible adapter, Mock
+  Anthropic, Custom OpenAI-compatible adapter, Mock
 
 L1 Persistence
-  SQLite, Drizzle, workspace filesystem
+  SQLite and workspace filesystem, managed by FastAPI
 ```
 
 The central contract is `StreamEvent`. Adapter output, tool activity, artifact creation, pending approvals, dispatch state, and usage updates flow through this event model before reaching the UI.
@@ -345,7 +337,6 @@ AgentHub assumes LLM output is untrusted.
 - File tools resolve paths under the conversation effective workspace.
 - Bash commands run inside the workspace cwd.
 - Dangerous bash patterns are blocked.
-- Risky commands can require approval.
 - Generated web app artifacts render in sandboxed iframes.
 - API keys are local settings or environment variables; there is no hosted key service.
 
@@ -356,9 +347,7 @@ This is a local single-user app, not a multi-tenant hosted service.
 ## Known Limits
 
 - Linux desktop packaging is not configured yet.
-- Cross-platform Electron builds with native modules should be handled through target-platform machines or CI.
-- Claude Code SDK can write files through its own tool layer; sandbox quota enforcement only applies to AgentHub-managed file tools.
-- Some SDK-level command/file approval bridges depend on what the underlying adapter exposes.
+- The FastAPI backend has a placeholder for the Codex adapter. Use a supported Anthropic or OpenAI-compatible adapter for agent runs.
 - The mobile app is a companion client, not a standalone agent runtime.
 
 ---

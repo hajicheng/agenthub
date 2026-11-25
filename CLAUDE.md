@@ -36,10 +36,11 @@
 | 语言 | TypeScript（strict 模式） | 不写 `any`，需要时用 `unknown` 再 narrow |
 | 样式 | Tailwind CSS + shadcn/ui | 不引入其他 UI 库；shadcn 是「复制组件到本项目」模式 |
 | 状态 | Zustand + Immer middleware | 不用 Redux/Recoil/MobX |
-| ORM | Drizzle | 不用 Prisma |
-| DB | SQLite（`better-sqlite3` 驱动） | 不引入 Postgres/MySQL |
+| 后端 | FastAPI + Python | 由 Next.js 转发 API 请求 |
+| DB | SQLite（Python `sqlite3`） | 不引入 Postgres/MySQL |
 | 流式传输 | SSE（一条全局连接） | 不用 WebSocket |
-| AI SDK | `@anthropic-ai/sdk`、`@anthropic-ai/claude-agent-sdk`、`openai`、`@openai/codex-sdk` | 通过适配器层屏蔽差异 |
+| AI SDK | Python `anthropic` 和 `openai` | 通过适配器层屏蔽差异 |
+| 群聊编排 | FastAPI 后端的 Python LangGraph | AgentRunner 的逐项委派工具使用 StateGraph 管理审批和执行 |
 | 包管理 | pnpm | 不用 npm/yarn（lockfile 唯一） |
 | Node 版本 | ≥ 20 | 用 `node --experimental-strip-types` 跑 TS 脚本时需要 |
 
@@ -54,7 +55,7 @@ L5 UI 组件
 L4 State + Transport（Zustand store + SSE 客户端）
 L3 Application Services（AgentRunner、ConversationService、EventBus、ToolExecutor）
 L2 Agent Platform Adapters（ClaudeCode/Codex/CustomAgent/Mock）
-L1 Persistence（Drizzle + SQLite + workspace 文件系统）
+L1 Persistence（SQLite + workspace 文件系统）
 ```
 
 **铁律**：
@@ -97,7 +98,9 @@ message.parts = [
 
 ### 3.6 Orchestrator 是特殊 Agent，不是独立服务
 
-Orchestrator 走同一个 `AgentRunner`，只是多了 `dispatch_to_agent` 工具与不同的 system prompt。**不要**为它写独立服务路径。
+Orchestrator 是群聊唯一的直接回复者，通过 `AgentRunner` 和主 Agent 专用的 `delegate_task` 工具逐项委派。**不要**为它写独立服务路径。
+
+FastAPI 后端由 `backend/app/runner/orchestration_graph.py` 定义委派工作流。子 Run 结果由适配器交回同一轮主 Agent 的工具循环，事件经 EventBus 发布。
 
 ---
 
@@ -168,7 +171,7 @@ Orchestrator 走同一个 `AgentRunner`，只是多了 `dispatch_to_agent` 工�
 
 ### 5.4 API Key 管理
 
-Key 来源按优先级（详见 `src/server/settings-service.ts` 与 `src/server/agent-runner.ts:buildAdapterInput`）：
+Key 来源按优先级（详见 `backend/app/services/settings_service.py` 和 `backend/app/runner/agent_runner.py`）：
 
 1. **`agents.api_key`** — per-agent override（最高优先级；agent 库里单独填）
 2. **`app_settings.<provider>_api_key`** — 用户在「设置」面板（Sidebar 齿轮）全局自填，存 SQLite `app_settings` 单行表
