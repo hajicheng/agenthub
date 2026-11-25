@@ -195,3 +195,26 @@ def test_codex_adapter_stub():
 
     with pytest.raises(NotImplementedError, match="CodexAdapter"):
         asyncio.run(_run())
+
+
+def test_sandbox_workspace_with_stale_root_is_recovered_on_startup(client):
+    from app.config import get_workspaces_root
+    from app.db.client import db_tx
+
+    result = client.post("/api/conversations", json={"mode": "single", "agentIds": ["ag_pm"]})
+    assert result.status_code == 201
+    conversation_id = result.json()["conversation"]["id"]
+    current_root = get_workspaces_root() / conversation_id
+    (current_root / "kept.txt").write_text("existing work", encoding="utf-8")
+    stale_root = current_root.parent.parent / "old-install" / "workspaces" / conversation_id
+    with db_tx() as conn:
+        conn.execute(
+            "UPDATE workspaces SET root_path = ? WHERE conversation_id = ?",
+            (str(stale_root), conversation_id),
+        )
+    close_db()
+    init_db()
+
+    result = client.get(f"/api/conversations/{conversation_id}/fs/listdir", params={"path": "."})
+    assert result.status_code == 200
+    assert [entry["name"] for entry in result.json()["entries"]] == ["kept.txt"]

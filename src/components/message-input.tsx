@@ -20,7 +20,6 @@ import {
 import { nanoid } from 'nanoid'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { AgentAvatar } from '@/components/agent-avatar'
 import { AttachmentChip, PendingAttachmentChip } from '@/components/attachment-chip'
 import { QuotedMessage } from '@/components/quoted-message'
 import { SlashCommandHelpDialog } from '@/components/slash-command-help-dialog'
@@ -50,11 +49,6 @@ import { getToolDisplayName } from '@/lib/tool-display'
 import { emitUiCommand } from '@/lib/ui-command-events'
 import { cn } from '@/lib/utils'
 import { useAppStore, usePendingAttachments, usePendingPlanReviewForConversation, useTopLevelRunningRuns } from '@/stores/app-store'
-
-interface MentionTrigger {
-  start: number // textarea 中 @ 字符的 index
-  query: string // @ 之后到光标之间的字符
-}
 
 interface SlashTrigger {
   start: number
@@ -237,9 +231,6 @@ function safeFileName(value: string): string {
 
 export function MessageInput({ conversationId }: { conversationId: string }) {
   const [content, setContent] = useState('')
-  const [mentionedIds, setMentionedIds] = useState<string[]>([])
-  const [trigger, setTrigger] = useState<MentionTrigger | null>(null)
-  const [highlight, setHighlight] = useState(0)
   const [slashTrigger, setSlashTrigger] = useState<SlashTrigger | null>(null)
   const [slashHighlight, setSlashHighlight] = useState(0)
   const [slashHelpOpen, setSlashHelpOpen] = useState(false)
@@ -247,6 +238,7 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
   const [clearingHistory, setClearingHistory] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [sending, setSending] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
   const [aborting, setAborting] = useState(false)
   const [uploading, setUploading] = useState<Array<{ tempId: string; name: string }>>([])
 
@@ -256,14 +248,15 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
   const addLocalUserMessage = useAppStore((s) => s.addLocalUserMessage)
   const upsertMessage = useAppStore((s) => s.upsertMessage)
   const replaceLocalMessageId = useAppStore((s) => s.replaceLocalMessageId)
+  const removeMessages = useAppStore((s) => s.removeMessages)
   const clearConversationHistory = useAppStore((s) => s.clearConversationHistory)
   const conversation = useAppStore((s) => s.conversations[conversationId])
   const upsertConversation = useAppStore((s) => s.upsertConversation)
   const agents = useAppStore((s) => s.agents)
   const runningRuns = useTopLevelRunningRuns(conversationId)
-  const isRunning = runningRuns.length > 0
-  // 计划待审批时，输入框改作「对计划提修改意见」用——即使 orchestrator run 仍在 running 也放开
+  // 委派待审批时，输入框接收用户的修改意见。
   const planReview = usePendingPlanReviewForConversation(conversationId)
+  const isRunning = runningRuns.length > 0 || planReview !== null
   const composerLocked = isRunning && !planReview
   const pending = usePendingAttachments(conversationId)
   const addPendingAttachment = useAppStore((s) => s.addPendingAttachment)
@@ -284,23 +277,6 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
   }, [pendingQuote])
 
   const isGroup = conversation?.mode === 'group'
-
-  // 可被 @ 的 agent：群聊里所有成员，包含 Orchestrator
-  // (@ Orchestrator 是合法语义：用户明确请求 Orchestrator 接手)
-  const candidates = useMemo<AgentRow[]>(() => {
-    if (!conversation) return []
-    return conversation.agentIds
-      .map((id) => agents[id])
-      .filter((a): a is AgentRow => Boolean(a))
-  }, [conversation, agents])
-
-  // 过滤候选
-  const filtered = useMemo(() => {
-    if (!trigger) return []
-    const q = trigger.query.toLowerCase()
-    if (!q) return candidates
-    return candidates.filter((a) => a.name.toLowerCase().includes(q))
-  }, [trigger, candidates])
 
   const slashCommands = useMemo<SlashCommandItem[]>(
     () =>
@@ -365,11 +341,6 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
     )
   }, [slashTrigger, slashCommands])
 
-  // 候选变化时重置高亮项
-  useEffect(() => {
-    setHighlight(0)
-  }, [trigger?.query, filtered.length])
-
   useEffect(() => {
     setSlashHighlight(0)
   }, [slashTrigger?.query, filteredSlashCommands.length])
@@ -377,13 +348,10 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
   // 切换会话清空 state（pending 由 store 自己分桶，不需要在这里清）
   useEffect(() => {
     setContent('')
-    setMentionedIds([])
-    setTrigger(null)
+    setSendError(null)
     setSlashTrigger(null)
     setUploading([])
   }, [conversationId])
-
-  const mentionedAgents = mentionedIds.map((id) => agents[id]).filter(Boolean)
 
   const detectSlashTrigger = (text: string, cursor: number): SlashTrigger | null => {
     const beforeCursor = text.slice(0, cursor)
@@ -397,39 +365,7 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
   }
 
   const updateInputTriggers = (text: string, cursor: number) => {
-    const slash = detectSlashTrigger(text, cursor)
-    if (slash) {
-      setSlashTrigger(slash)
-      setTrigger(null)
-      return
-    }
-
-    setSlashTrigger(null)
-    updateMentionTrigger(text, cursor)
-  }
-
-  // —— 触发检测：从光标往前找 @，遇 whitespace 则放弃；@ 前必须是 word boundary
-  const updateMentionTrigger = (text: string, cursor: number) => {
-    if (!isGroup) return setTrigger(null)
-    let i = cursor - 1
-    while (i >= 0) {
-      const c = text[i]
-      if (c === '@') {
-        const before = i === 0 ? ' ' : text[i - 1]
-        if (/\s/.test(before)) {
-          setTrigger({ start: i, query: text.slice(i + 1, cursor) })
-          return
-        }
-        setTrigger(null)
-        return
-      }
-      if (/\s/.test(c)) {
-        setTrigger(null)
-        return
-      }
-      i--
-    }
-    setTrigger(null)
+    setSlashTrigger(detectSlashTrigger(text, cursor))
   }
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -442,29 +378,6 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
   const handleSelect = () => {
     const cursor = textareaRef.current?.selectionStart ?? 0
     updateInputTriggers(content, cursor)
-  }
-
-  const fillMention = (agent: AgentRow) => {
-    if (!trigger || !textareaRef.current) return
-    const cursor = textareaRef.current.selectionStart ?? content.length
-    const insertText = `@${agent.name} `
-    const newContent =
-      content.slice(0, trigger.start) + insertText + content.slice(cursor)
-    setContent(newContent)
-    setMentionedIds((prev) => (prev.includes(agent.id) ? prev : [...prev, agent.id]))
-    setTrigger(null)
-    setSlashTrigger(null)
-
-    // 把光标移到插入的尾部
-    requestAnimationFrame(() => {
-      const newPos = trigger.start + insertText.length
-      textareaRef.current?.setSelectionRange(newPos, newPos)
-      textareaRef.current?.focus()
-    })
-  }
-
-  const removeMention = (id: string) => {
-    setMentionedIds((prev) => prev.filter((x) => x !== id))
   }
 
   const removePending = (id: string) => {
@@ -494,8 +407,6 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
 
   const clearSlashCommandInput = () => {
     setContent('')
-    setMentionedIds([])
-    setTrigger(null)
     setSlashTrigger(null)
   }
 
@@ -568,7 +479,6 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
       tempId,
       conversationId,
       content: '/deploy',
-      mentionedAgentIds: [],
       attachments: [],
     })
     setSending(true)
@@ -646,30 +556,6 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
         return
       }
     }
-    // 在 popup 打开时，方向键/Enter/Esc 走 popup
-    if (trigger && filtered.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        setHighlight((i) => (i + 1) % filtered.length)
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        setHighlight((i) => (i - 1 + filtered.length) % filtered.length)
-        return
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault()
-        fillMention(filtered[highlight])
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        setTrigger(null)
-        return
-      }
-    }
-
     // 默认 Enter 提交
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -681,16 +567,18 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
     const text = content.trim()
     const hasAttachments = pending.length > 0
 
-    // 计划审批中：把输入当作对计划的自然语言修改意见，交给 Orchestrator 重排（不走普通发送）。
+    // 委派审批中，输入作为修改意见交回主 Agent。
     // 反馈会由服务端落库 + 广播成一条 user 消息回显到对话。
     if (planReview) {
       if (!text || sending) return
+      setSendError(null)
       setContent('')
       setSending(true)
       try {
         await reviseDispatchPlan(conversationId, planReview.planId, text)
       } catch (err) {
-        console.error('[MessageInput] revise plan failed', err)
+        setContent((current) => current || text)
+        setSendError(err instanceof Error ? err.message : String(err))
       } finally {
         setSending(false)
       }
@@ -698,6 +586,7 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
     }
 
     if ((!text && !hasAttachments) || sending || isRunning) return
+    setSendError(null)
 
     const exactSlashCommand = slashCommands.find((command) => command.command === text)
     if (exactSlashCommand) {
@@ -716,13 +605,10 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
       tempId,
       conversationId,
       content: finalContent,
-      mentionedAgentIds: mentionedIds,
       parentMessageId: parentId,
       attachments: pending,
     })
     setContent('')
-    setMentionedIds([])
-    setTrigger(null)
     setSlashTrigger(null)
     if (pendingQuote) setPendingQuote(null)
     const attachmentIds = pending.map((a) => a.id)
@@ -733,14 +619,18 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
     try {
       const result = await sendMessageAPI(conversationId, {
         content: finalContent,
-        mentionedAgentIds: mentionedIds,
         parentMessageId: parentId,
         attachmentIds,
       })
       replaceLocalMessageId(tempId, result.messageId)
       upsertReturnedMessages(result.messages)
     } catch (err) {
-      console.error('[MessageInput] send failed', err)
+      removeMessages(conversationId, [tempId])
+      setContent((current) => current || text)
+      for (const attachment of pending) addPendingAttachment(conversationId, attachment)
+      if (pendingQuote) setPendingQuote(pendingQuote)
+      if (replyTargetId) setReplyTarget(conversationId, replyTargetId)
+      setSendError(err instanceof Error ? err.message : String(err))
     } finally {
       setSending(false)
     }
@@ -750,7 +640,9 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
     if (aborting) return
     setAborting(true)
     try {
-      await Promise.allSettled(runningRuns.map((r) => abortRun(r.id)))
+      const runIds = new Set(runningRuns.map((run) => run.id))
+      if (planReview) runIds.add(planReview.runId)
+      await Promise.allSettled(Array.from(runIds, abortRun))
     } finally {
       setAborting(false)
     }
@@ -835,30 +727,6 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
         </div>
       )}
 
-      {/* 已确认的 mention chips */}
-      {mentionedAgents.length > 0 && (
-        <div className="mb-2 flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] text-muted-foreground">@ 指定</span>
-          {mentionedAgents.map((a) => (
-            <span
-              key={a.id}
-              className="inline-flex items-center gap-1 rounded-full bg-primary/10 py-0.5 pl-1 pr-1.5 text-xs text-primary"
-            >
-              <AgentAvatar agent={a} size="xs" />
-              <span>{a.name}</span>
-              <button
-                type="button"
-                onClick={() => removeMention(a.id)}
-                className="rounded-full p-0.5 hover:bg-primary/20"
-                title="移除"
-              >
-                <X className="size-3" />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
       <Dialog
         open={clearHistoryOpen}
         onOpenChange={(open) => {
@@ -910,36 +778,7 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
         onSelect={(command) => void executeSlashCommand(command)}
       />
 
-      {/* @ Mention popup */}
-      {trigger && filtered.length > 0 && (
-        <div className="absolute bottom-full left-3 right-3 mb-2 max-h-60 overflow-y-auto rounded-md border bg-popover p-1 shadow-md">
-          <div className="px-2 py-1 text-[10px] text-muted-foreground">
-            选择 Agent · ↑↓ 切换 · Enter 确认 · Esc 取消
-          </div>
-          {filtered.map((a, i) => (
-            <button
-              key={a.id}
-              type="button"
-              onMouseDown={(e) => {
-                // 阻止 textarea 失焦，否则 selectionStart 拿不到正确位置
-                e.preventDefault()
-                fillMention(a)
-              }}
-              onMouseEnter={() => setHighlight(i)}
-              className={cn(
-                'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition',
-                i === highlight && 'bg-accent',
-              )}
-            >
-              <AgentAvatar agent={a} size="xs" />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-xs font-medium">{a.name}</div>
-                <div className="truncate text-[10px] text-muted-foreground">{a.description}</div>
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
+      {sendError && <p role="alert" className="text-xs text-destructive">{sendError}</p>}
 
       <div className="flex items-center gap-2">
         <Textarea
@@ -951,11 +790,11 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
           onKeyDown={handleKeyDown}
           placeholder={
             planReview
-              ? '对计划提修改意见，或点上方执行/拒绝…'
+              ? '对委派任务提修改意见，或在上方批准或拒绝…'
               : isRunning
                 ? '当前有 Agent 正在响应…'
                 : isGroup
-                  ? '输入消息，@ 指定 Agent，Enter 发送，Shift+Enter 换行'
+                  ? '向主 Agent 发送消息，Enter 发送，Shift+Enter 换行'
                   : '输入消息，Enter 发送，Shift+Enter 换行'
           }
           className="min-h-[44px] max-h-40 resize-none"

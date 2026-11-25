@@ -109,7 +109,6 @@ async def post_message(conv_id: str, request: Request) -> JSONResponse:
         res = await send_message(
             conversation_id=conv_id,
             content=content,
-            mentioned_agent_ids=body.get("mentionedAgentIds"),
             parent_message_id=body.get("parentMessageId"),
             attachment_ids=att_ids,
         )

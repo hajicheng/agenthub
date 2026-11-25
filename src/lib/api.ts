@@ -415,7 +415,6 @@ export async function clearConversationHistory(
 
 export interface SendMessageBody {
   content: string
-  mentionedAgentIds?: string[]
   parentMessageId?: string
   attachmentIds?: string[]
 }

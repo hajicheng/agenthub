@@ -5,6 +5,8 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.observability import openai_usage, trace_step
+
 from app.db.client import db_read, db_tx, row_to_message
 from app.ids import new_context_summary_id
 from app.services.conversation_context import estimate_tokens, extract_text_from_parts
@@ -47,7 +49,8 @@ async def compact_conversation(conversation_id: str) -> dict[str, Any]:
         if not conv:
             raise ValueError(f"Conversation not found: {conversation_id}")
         rows = conn.execute(
-            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+            """SELECT m.* FROM messages m LEFT JOIN agent_runs r ON r.id = m.run_id
+            WHERE m.conversation_id = ? AND r.parent_run_id IS NULL ORDER BY m.created_at ASC""",
             (conversation_id,),
         ).fetchall()
 
@@ -79,17 +82,32 @@ async def compact_conversation(conversation_id: str) -> dict[str, Any]:
     if api_key:
         try:
             client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-            resp = await client.chat.completions.create(
+            messages = [
+                {
+                    "role": "system",
+                    "content": "Summarize the following conversation concisely, preserving key decisions, goals, file paths, artifact IDs, and open questions.",
+                },
+                {"role": "user", "content": transcript[:24000]},
+            ]
+            with trace_step(
+                "conversation.compaction",
+                as_type="generation",
                 model=model_id,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Summarize the following conversation concisely, preserving key decisions, goals, file paths, artifact IDs, and open questions.",
-                    },
-                    {"role": "user", "content": transcript[:24000]},
-                ],
-                temperature=0.2,
-            )
+                metadata={"provider": provider},
+                input=messages,
+                secrets=(api_key,),
+                conversation_id=conversation_id,
+            ) as generation:
+                resp = await client.chat.completions.create(
+                    model=model_id,
+                    messages=messages,
+                    temperature=0.2,
+                )
+                generation.model = resp.model or model_id
+                if resp.choices:
+                    generation.output = resp.choices[0].message.content
+                if resp.usage is not None:
+                    generation.usage = openai_usage(resp.usage.model_dump())
             summary_text = (resp.choices[0].message.content or "").strip()
             used_provider = provider
             used_model = model_id

@@ -6,6 +6,8 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.observability import openai_usage, trace_step
+
 from app.services.settings_service import get_effective_api_key
 
 
@@ -29,23 +31,37 @@ async def create_agent_config_draft(payload: dict[str, Any]) -> dict[str, Any]:
     if api_key:
         try:
             client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-            resp = await client.chat.completions.create(
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate a JSON object for an AgentHub agent configuration with keys: "
+                        "name (string, max 32 chars), avatar (single emoji), description (string, max 200 chars), "
+                        "capabilities (array of 2-5 short strings), systemPrompt (detailed markdown string), "
+                        "toolNames (subset of ['write_artifact','read_artifact','deploy_artifact','read_attachment','fs_list','fs_read','fs_write','bash','ask_user']). "
+                        "Return ONLY valid JSON."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ]
+            with trace_step(
+                "agent.config-draft",
+                as_type="generation",
                 model=model_id,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Generate a JSON object for an AgentHub agent configuration with keys: "
-                            "name (string, max 32 chars), avatar (single emoji), description (string, max 200 chars), "
-                            "capabilities (array of 2-5 short strings), systemPrompt (detailed markdown string), "
-                            "toolNames (subset of ['write_artifact','read_artifact','deploy_artifact','read_attachment','fs_list','fs_read','fs_write','bash','ask_user']). "
-                            "Return ONLY valid JSON."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.4,
-            )
+                metadata={"provider": provider},
+                input=messages,
+                secrets=(api_key,),
+            ) as generation:
+                resp = await client.chat.completions.create(
+                    model=model_id,
+                    messages=messages,
+                    temperature=0.4,
+                )
+                generation.model = resp.model or model_id
+                if resp.choices:
+                    generation.output = resp.choices[0].message.content
+                if resp.usage is not None:
+                    generation.usage = openai_usage(resp.usage.model_dump())
             raw = resp.choices[0].message.content or ""
             match = re.search(r"\{[\s\S]*\}", raw)
             if match:

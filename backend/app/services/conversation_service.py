@@ -61,7 +61,7 @@ def create_conversation(
         raise ValueError("At least one agent is required")
     if mode == "single" and len(agent_ids) != 1:
         raise ValueError("Single conversation requires exactly one agent")
-    if mode == "group" and len(agent_ids) < 2:
+    if mode == "group" and len(set(agent_ids)) < 2:
         raise ValueError("Group conversation requires at least two agents")
 
     placeholders = ",".join("?" for _ in agent_ids)
@@ -73,6 +73,8 @@ def create_conversation(
         found = {r["id"] for r in agent_rows}
         missing = [aid for aid in agent_ids if aid not in found]
         raise ValueError(f"Agents not found: {', '.join(missing)}")
+    if mode == "group" and sum(bool(row["is_orchestrator"]) for row in agent_rows) != 1:
+        raise ValueError("群聊需要选择一位主 Agent（Orchestrator）")
 
     workspace_mode = "sandbox"
     resolved_bound_path: str | None = None
@@ -208,6 +210,8 @@ def add_agents_to_conversation(conversation_id: str, agent_ids: list[str]) -> di
         existing = json.loads(row["agent_ids"] or "[]")
         merged = list(dict.fromkeys(existing + agent_ids))
         new_mode = "group" if len(merged) >= 2 else "single"
+        if new_mode == "group":
+            _resolve_responder({"mode": new_mode, "agentIds": merged})
         now = int(time.time() * 1000)
         conn.execute(
             "UPDATE conversations SET agent_ids = ?, mode = ?, updated_at = ? WHERE id = ?",
@@ -261,7 +265,9 @@ def list_messages_snapshot(conversation_id: str) -> dict[str, Any]:
     event_id = event_bus.last_event_id()
     with db_read() as conn:
         rows = conn.execute(
-            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+            """SELECT m.*, r.parent_run_id FROM messages m
+            LEFT JOIN agent_runs r ON r.id = m.run_id
+            WHERE m.conversation_id = ? ORDER BY m.created_at ASC""",
             (conversation_id,),
         ).fetchall()
     return {"messages": [row_to_message(r) for r in rows], "eventId": event_id}
@@ -354,22 +360,24 @@ def toggle_pinned_message(conversation_id: str, message_id: str) -> dict[str, An
     return {"pinnedMessageIds": nxt, "pinned": not is_pin}
 
 
-def _decide_responders(
-    conv: dict[str, Any], mentions: list[str], agents_in_conv: list[dict[str, Any]]
-) -> list[str]:
+def _resolve_responder(conv: dict[str, Any]) -> str:
     if conv["mode"] == "single":
-        return list(conv["agentIds"])
-    if mentions:
-        return [aid for aid in mentions if aid in conv["agentIds"]]
-    orch = next((a for a in agents_in_conv if a["isOrchestrator"]), None)
-    return [orch["id"]] if orch else []
+        return conv["agentIds"][0]
+    placeholders = ",".join("?" for _ in conv["agentIds"])
+    with db_read() as conn:
+        leads = conn.execute(
+            f"SELECT id FROM agents WHERE is_orchestrator = 1 AND id IN ({placeholders})",
+            conv["agentIds"],
+        ).fetchall()
+    if len(leads) != 1:
+        raise ValueError("群聊需要一位主 Agent，请在群成员中加入 Orchestrator")
+    return leads[0]["id"]
 
 
 async def send_message(
     *,
     conversation_id: str,
     content: str = "",
-    mentioned_agent_ids: list[str] | None = None,
     parent_message_id: str | None = None,
     attachment_ids: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -402,7 +410,12 @@ async def send_message(
                 }
             )
 
-    mentions = mentioned_agent_ids or []
+    deploy_intent = (
+        parse_deploy_command(content)
+        if len(parts) == 1 and not parent_message_id and not attachment_ids
+        else None
+    )
+    responder = _resolve_responder(conv) if deploy_intent is None else None
     msg_record = {
         "id": message_id,
         "conversationId": conversation_id,
@@ -411,7 +424,7 @@ async def send_message(
         "parts": parts,
         "status": "complete",
         "parentMessageId": parent_message_id,
-        "mentionedAgentIds": mentions,
+        "mentionedAgentIds": [],
         "runId": None,
         "usage": None,
         "createdAt": now,
@@ -428,7 +441,7 @@ async def send_message(
                 conversation_id,
                 json.dumps(parts, ensure_ascii=False),
                 parent_message_id,
-                json.dumps(mentions),
+                "[]",
                 now,
             ),
         )
@@ -443,11 +456,6 @@ async def send_message(
         }
     )
 
-    deploy_intent = (
-        parse_deploy_command(content)
-        if len(parts) == 1 and not parent_message_id and not mentions and not attachment_ids
-        else None
-    )
     if deploy_intent is not None:
         deploy = handle_deploy_command(
             conversation_id=conversation_id,
@@ -456,26 +464,15 @@ async def send_message(
         )
         return {"messageId": message_id, "runIds": [], "messages": [deploy["message"]], "deploy": deploy}
 
-    placeholders = ",".join("?" for _ in conv["agentIds"])
-    with db_read() as conn:
-        agent_rows = conn.execute(
-            f"SELECT * FROM agents WHERE id IN ({placeholders})", conv["agentIds"]
-        ).fetchall()
-    agents_in_conv = [row_to_agent(r) for r in agent_rows]
-    responders = _decide_responders(conv, mentions, agents_in_conv)
-
     from app.runner.agent_runner import agent_runner
 
-    run_ids: list[str] = []
-    for agent_id in responders:
-        run_id = agent_runner.start_run(
-            agent_id=agent_id,
-            conversation_id=conversation_id,
-            trigger_message_id=message_id,
-        )
-        run_ids.append(run_id)
-
-    return {"messageId": message_id, "runIds": run_ids}
+    assert responder is not None
+    run_id = agent_runner.start_run(
+        agent_id=responder,
+        conversation_id=conversation_id,
+        trigger_message_id=message_id,
+    )
+    return {"messageId": message_id, "runIds": [run_id]}
 
 
 def revise_dispatch_plan(*, conversation_id: str, plan_id: str, feedback: str) -> tuple[bool, str | None]:
@@ -590,6 +587,8 @@ async def regenerate_latest_response(conversation_id: str) -> dict[str, Any]:
     if not conv:
         raise ValueError(f"Conversation not found: {conversation_id}")
 
+    responder = _resolve_responder(conv)
+
     with db_read() as conn:
         latest_user_row = conn.execute(
             "SELECT * FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY created_at DESC LIMIT 1",
@@ -647,27 +646,18 @@ async def regenerate_latest_response(conversation_id: str) -> dict[str, Any]:
         }
     )
 
-    ph = ",".join("?" for _ in conv["agentIds"])
-    with db_read() as conn:
-        agent_rows = conn.execute(f"SELECT * FROM agents WHERE id IN ({ph})", conv["agentIds"]).fetchall()
-    agents_in_conv = [row_to_agent(r) for r in agent_rows]
-    responders = _decide_responders(conv, latest_user["mentionedAgentIds"], agents_in_conv)
-
     from app.runner.agent_runner import agent_runner
 
-    new_run_ids = [
-        agent_runner.start_run(
-            agent_id=aid,
-            conversation_id=conversation_id,
-            trigger_message_id=latest_user["id"],
-        )
-        for aid in responders
-    ]
+    new_run_id = agent_runner.start_run(
+        agent_id=responder,
+        conversation_id=conversation_id,
+        trigger_message_id=latest_user["id"],
+    )
     return {
         "deletedMessageIds": msg_ids,
         "deletedArtifactIds": list(art_ids),
         "triggerMessageId": latest_user["id"],
-        "runIds": new_run_ids,
+        "runIds": [new_run_id],
     }
 
 
@@ -693,11 +683,14 @@ async def edit_and_resend_latest_user_message(
         for p in orig["parts"]
         if p.get("type") in ("image_attachment", "file_attachment") and p.get("attachmentId")
     ]
+    conv = get_conversation(conversation_id)
+    if not conv:
+        raise ValueError(f"Conversation not found: {conversation_id}")
+    _resolve_responder(conv)
     withdrawn = await withdraw_latest_user_message(conversation_id, message_id)
     sent = await send_message(
         conversation_id=conversation_id,
         content=trimmed,
-        mentioned_agent_ids=orig["mentionedAgentIds"],
         parent_message_id=orig["parentMessageId"],
         attachment_ids=att_ids or None,
     )

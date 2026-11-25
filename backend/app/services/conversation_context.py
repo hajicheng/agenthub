@@ -35,7 +35,8 @@ def build_history_for(
 ) -> list[dict[str, Any]]:
     with db_read() as conn:
         rows = conn.execute(
-            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+            """SELECT m.* FROM messages m LEFT JOIN agent_runs r ON r.id = m.run_id
+            WHERE m.conversation_id = ? AND r.parent_run_id IS NULL ORDER BY m.created_at ASC""",
             (conversation_id,),
         ).fetchall()
         agent_rows = conn.execute("SELECT id, name FROM agents").fetchall()
@@ -88,7 +89,8 @@ def get_pinned_messages_block(conversation_id: str) -> str:
             return ""
         placeholders = ",".join("?" for _ in pinned_ids)
         rows = conn.execute(
-            f"SELECT * FROM messages WHERE id IN ({placeholders}) ORDER BY created_at ASC",
+            f"""SELECT m.* FROM messages m LEFT JOIN agent_runs r ON r.id = m.run_id
+            WHERE m.id IN ({placeholders}) AND r.parent_run_id IS NULL ORDER BY m.created_at ASC""",
             pinned_ids,
         ).fetchall()
     if not rows:

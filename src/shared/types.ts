@@ -334,6 +334,7 @@ export interface PendingDispatchPlan {
   conversationId: string
   agentId: string
   runId: string
+  messageId?: string
   plan: DispatchPlanItem[]
   createdAt: number
 }
@@ -395,7 +396,7 @@ export type StreamEvent = BaseEvent &
     | { type: 'run.start'; runId: string; agentId: string; triggerMessageId: string; parentRunId?: string }
     | { type: 'run.end'; runId: string; status: 'complete' | 'failed' | 'aborted'; error?: string }
     | { type: 'run.usage'; runId: string; usage: RunUsageEvent }
-    | { type: 'message.start'; messageId: string; agentId: string; runId: string }
+    | { type: 'message.start'; messageId: string; agentId: string; runId: string; parentRunId?: string }
     | { type: 'message.end'; messageId: string }
     | { type: 'message.usage'; messageId: string; usage: MessageUsageEvent }
     | { type: 'message.added'; message: MessageRecord }
@@ -409,12 +410,13 @@ export type StreamEvent = BaseEvent &
     | { type: 'artifact.update'; artifactId: string; patch: Partial<ArtifactContent> }
     | { type: 'deploy.status'; messageId: string; deployment: DeployStatusRecord }
     | { type: 'dispatch.plan.pending'; pendingPlan: PendingDispatchPlan }
-    | { type: 'dispatch.plan.resolved'; pendingId: string; runId: string; approved: boolean; revising?: boolean }
-    | { type: 'dispatch.plan'; runId: string; plan: DispatchPlanItem[] }
-    | { type: 'dispatch.start'; parentRunId: string; childRunId: string; taskId: string; agentId: string }
+    | { type: 'dispatch.plan.resolved'; pendingId: string; runId: string; messageId?: string; approved: boolean; revising?: boolean }
+    | { type: 'dispatch.plan'; runId: string; messageId?: string; plan: DispatchPlanItem[] }
+    | { type: 'dispatch.start'; parentRunId: string; childRunId: string; messageId?: string; taskId: string; agentId: string }
     | {
         type: 'dispatch.end'
         parentRunId: string
+        messageId?: string
         childRunId?: string
         taskId: string
         status: DispatchTaskEndStatus
@@ -471,6 +473,7 @@ export interface MessageRecord {
   parentMessageId: string | null
   mentionedAgentIds: string[]
   runId: string | null
+  parentRunId?: string | null
   usage: MessageUsageEvent | null
   createdAt: number
 }

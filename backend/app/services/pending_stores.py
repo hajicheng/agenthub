@@ -238,6 +238,7 @@ class PendingDispatchPlansStore:
         conversation_id: str,
         agent_id: str,
         run_id: str,
+        message_id: str,
         plan: list[dict[str, Any]],
     ) -> tuple[dict[str, Any], asyncio.Future[dict[str, Any]]]:
         pid = new_pending_dispatch_plan_id()
@@ -247,6 +248,7 @@ class PendingDispatchPlansStore:
             "conversationId": conversation_id,
             "agentId": agent_id,
             "runId": run_id,
+            "messageId": message_id,
             "plan": plan,
             "createdAt": now,
         }
@@ -284,6 +286,7 @@ class PendingDispatchPlansStore:
                 "timestamp": int(time.time() * 1000),
                 "pendingId": pid,
                 "runId": rec["runId"],
+                "messageId": rec["messageId"],
                 "approved": True,
             }
         )
@@ -303,6 +306,7 @@ class PendingDispatchPlansStore:
                 "timestamp": int(time.time() * 1000),
                 "pendingId": pid,
                 "runId": rec["runId"],
+                "messageId": rec["messageId"],
                 "approved": False,
             }
         )
@@ -322,6 +326,7 @@ class PendingDispatchPlansStore:
                 "timestamp": int(time.time() * 1000),
                 "pendingId": pid,
                 "runId": rec["runId"],
+                "messageId": rec["messageId"],
                 "approved": False,
                 "revising": True,
             }

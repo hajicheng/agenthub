@@ -24,6 +24,26 @@ test('会话搜索过滤', async ({ page }) => {
   await expect(page.getByText(/没有匹配/)).toBeVisible()
 })
 
+test('群聊由主 Agent 接收普通文本', async ({ page, request }) => {
+  const workers = ['ag_e2e_mock', 'ag_pm']
+  const missingLead = await request.post('/api/conversations', { data: { mode: 'group', agentIds: workers } })
+  expect(missingLead.status()).toBe(400)
+  const title = `主 Agent 群聊 ${Date.now()}`
+  const created = await request.post('/api/conversations', {
+    data: { title, mode: 'group', agentIds: ['ag_orchestrator', ...workers] },
+  })
+  expect(created.status()).toBe(201)
+
+  await page.goto('/')
+  await page.locator('aside').getByText(title, { exact: true }).click()
+
+  const composer = page.getByTestId('composer-input')
+  await expect(composer).toHaveAttribute('placeholder', /向主 Agent/)
+  await composer.fill('@E2E')
+  await expect(composer).toHaveValue('@E2E')
+  await expect(page.getByText('选择 Agent · ↑↓ 切换 · Enter 确认 · Esc 取消')).toHaveCount(0)
+})
+
 test('会话归档 → 取消归档', async ({ page }) => {
   await page.goto('/')
   await createChat(page)

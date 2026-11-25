@@ -51,6 +51,8 @@ export function NewConversationDialog({
     platform === 'windows' ? 'D:\\projects\\foo' : '/Users/me/projects/foo'
 
   const mode: 'single' | 'group' = selected.size > 1 ? 'group' : 'single'
+  const leadSelected = agents.filter((agent) => selected.has(agent.id) && agent.isOrchestrator).length === 1
+  const needsLead = mode === 'group' && !leadSelected
 
   const toggle = (id: string) => {
     setSelected((prev) => {
@@ -69,7 +71,7 @@ export function NewConversationDialog({
   }
 
   const submit = async () => {
-    if (selected.size === 0 || creating) return
+    if (selected.size === 0 || needsLead || creating) return
     setError(null)
 
     if (workspaceMode === 'local' && !boundPath.trim()) {
@@ -216,12 +218,12 @@ export function NewConversationDialog({
 
         <DialogFooter>
           <div className="mr-auto text-xs text-muted-foreground">
-            已选 {selected.size} 位 · 将创建{mode === 'single' ? '单聊' : '群聊'}
+            {needsLead ? '群聊需要选择一位主 Agent（Orchestrator）' : `已选 ${selected.size} 位 · 将创建${mode === 'single' ? '单聊' : '群聊'}`}
           </div>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button onClick={() => void submit()} disabled={selected.size === 0 || creating}>
+          <Button onClick={() => void submit()} disabled={selected.size === 0 || needsLead || creating}>
             {creating ? '创建中...' : '创建'}
           </Button>
         </DialogFooter>

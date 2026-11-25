@@ -67,6 +67,7 @@ export interface MessageRow {
   parentMessageId: string | null
   mentionedAgentIds: string[]
   runId: string | null
+  parentRunId?: string | null
   usage: MessageUsage | null
   createdAt: number
 }

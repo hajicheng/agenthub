@@ -12,6 +12,8 @@ class ToolContext:
     agent_id: str
     run_id: str
     abort_event: asyncio.Event
+    delegate_task: DelegationHandler | None = None
+    message_id: str | None = None
 
 
 @dataclass
@@ -19,6 +21,9 @@ class ToolResult:
     ok: bool
     value: Any = None
     error: str | None = None
+
+
+DelegationHandler = Callable[[dict[str, Any], str], Awaitable[ToolResult]]
 
 
 ToolHandler = Callable[[dict[str, Any], ToolContext], Awaitable[ToolResult]]

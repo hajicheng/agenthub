@@ -8,6 +8,7 @@ from typing import Any
 from pypdf import PdfReader
 
 from app.ids import new_deployment_id
+from app.observability import trace_step
 from app.services.artifact_content import build_artifact_content, describe_artifact_content_error
 from app.services.artifact_service import create_artifact, get_artifact
 from app.services.attachment_service import get_attachment, get_attachment_absolute_path
@@ -229,6 +230,10 @@ async def _bash_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(ok=False, error="Workspace not found")
     cwd = get_effective_cwd(ws)
     timeout_s = min(max(int(args.get("timeoutMs") or 30_000) / 1000.0, 1.0), 300.0)
+    child_env = {
+        key: value for key, value in os.environ.items()
+        if key.upper() not in {"LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"}
+    }
 
     try:
         if IS_WINDOWS:
@@ -239,6 +244,7 @@ async def _bash_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 "-Command",
                 command,
                 cwd=cwd,
+                env=child_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -246,6 +252,7 @@ async def _bash_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             proc = await asyncio.create_subprocess_shell(
                 command,
                 cwd=cwd,
+                env=child_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -265,11 +272,12 @@ async def _bash_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(ok=False, error=str(exc))
 
 
-async def _plan_tasks_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    tasks = args.get("tasks")
-    if not isinstance(tasks, list) or not tasks:
-        return ToolResult(ok=False, error="tasks must be a non-empty list")
-    return ToolResult(ok=True, value={"accepted": True, "reasoning": args.get("reasoning", ""), "tasks": tasks})
+async def _delegate_task_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    delegate = ctx.delegate_task
+    if delegate is None or ctx.message_id is None:
+        return ToolResult(ok=False, error="Only the lead can delegate, once per model response.")
+    ctx.delegate_task = None
+    return await delegate(args, ctx.message_id)
 
 
 async def _ask_user_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -409,29 +417,19 @@ class ToolRegistry:
                 handler=_bash_handler,
             ),
             ToolDefinition(
-                name="plan_tasks",
-                description="Create a multi-agent dispatch plan with tasks and dependencies.",
+                name="delegate_task",
+                description="Request approval and run one worker task. Wait for its result before deciding the next assignment.",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "reasoning": {"type": "string"},
-                        "tasks": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": {"type": "string"},
-                                    "agentId": {"type": "string"},
-                                    "task": {"type": "string"},
-                                    "dependsOn": {"type": "array", "items": {"type": "string"}},
-                                },
-                                "required": ["id", "agentId", "task"],
-                            },
-                        },
+                        "agentId": {"type": "string", "description": "ID of an available worker in this conversation"},
+                        "task": {"type": "string", "description": "Self-contained assignment, including expected outcomes"},
+                        "artifactIds": {"type": "array", "items": {"type": "string"}, "description": "Conversation artifacts the worker should use"},
                     },
-                    "required": ["reasoning", "tasks"],
+                    "required": ["agentId", "task"],
+                    "additionalProperties": False,
                 },
-                handler=_plan_tasks_handler,
+                handler=_delegate_task_handler,
             ),
             ToolDefinition(
                 name="ask_user",
@@ -493,10 +491,19 @@ class ToolRegistry:
             return ToolResult(ok=False, error=f"Unknown tool: {name}")
         if not isinstance(args, dict):
             args = {}
-        try:
-            return await tool.handler(args, ctx)
-        except Exception as exc:
-            return ToolResult(ok=False, error=str(exc))
+        with trace_step(
+            f"tool.{tool.name}", as_type="tool", input=args, abort_event=ctx.abort_event,
+        ) as observation:
+            try:
+                result = await tool.handler(args, ctx)
+            except Exception as exc:
+                observation.fail(exc)
+                observation.output = {"error": type(exc).__name__}
+                return ToolResult(ok=False, error=str(exc))
+            if not result.ok:
+                observation.status = "failed"
+            observation.output = result.value if result.ok else {"error": result.error}
+            return result
 
 
 tool_registry = ToolRegistry()

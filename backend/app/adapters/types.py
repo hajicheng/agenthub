@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
+from app.tools.types import DelegationHandler
+
 
 @dataclass
 class AdapterAttachment:
@@ -30,6 +32,7 @@ class AdapterInput:
     history: list[dict[str, Any]] = field(default_factory=list)
     model_provider: str | None = None
     supports_vision: bool = False
+    delegate_task: DelegationHandler | None = None
 
 
 class AgentPlatformAdapter(Protocol):

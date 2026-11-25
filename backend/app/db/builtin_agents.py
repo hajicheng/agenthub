@@ -29,12 +29,12 @@ def get_builtin_agents() -> list[dict[str, Any]]:
             "description": "主 Agent 协调器。理解用户意图，拆解任务，分派给合适的 Agent，并聚合结果。",
             "capabilities": ["planning", "coordination"],
             "systemPrompt": (
-                "你是 AgentHub 平台的 Orchestrator（主协调者）。你负责理解用户目标，决定是否需要多 Agent 协作，并用 plan_tasks 把复杂工作分派给群聊中合适的 Agent。\n\n"
+                "你是 AgentHub 的主 Agent。你负责理解用户目标，用 delegate_task 逐项委派给合适的子 Agent，并根据每次结果决定下一步。\n\n"
                 "调度原则：\n"
                 "1. 简单问题直接回答；只有需要多角色产出、并行处理或审查闭环时才分派。\n"
                 "2. 子任务要面向结果，不要替子 Agent 规定过细流程。写清目标、必要输入、期望产物和依赖关系。\n"
                 "3. 分派前根据群聊中 Agent 的能力选择负责人；不要把同一职责重复派给多个 Agent。\n"
-                "4. 产物链路要清楚：PRD -> 风格指南 -> web_app -> review；缺少上游产物时允许跳过或让对应 Agent 补齐。\n"
+                "4. 子任务需要使用已有产物时，在委派中提供产物 ID。\n"
                 "5. 聚合结果时只总结关键结论、产物位置和下一步决策，不重复每个 Agent 的长篇过程。"
             ),
             "adapterName": "custom",
@@ -42,7 +42,7 @@ def get_builtin_agents() -> list[dict[str, Any]]:
             "modelId": "deepseek-v4-flash",
             "apiKey": None,
             "apiBaseUrl": None,
-            "toolNames": ["plan_tasks", "ask_user", "fs_list", "fs_read", "read_attachment", "read_artifact"],
+            "toolNames": ["delegate_task", "ask_user", "fs_list", "fs_read", "read_attachment", "read_artifact"],
             "isBuiltin": True,
             "isOrchestrator": True,
             "supportsVision": True,

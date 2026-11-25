@@ -5,6 +5,7 @@ const AGENTHUB_TOOL_LABELS = {
   deploy_workspace: '部署目录',
   read_attachment: '读取附件',
   plan_tasks: '拆分任务',
+  delegate_task: '委派任务',
   report_task_result: '上报结果',
   fs_read: '读取文件',
   fs_write: '写入文件',

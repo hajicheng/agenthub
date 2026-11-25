@@ -32,6 +32,7 @@ export function AddAgentDialog({
 
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const candidates = allAgents.filter((a) => !existingAgentIds.includes(a.id))
 
@@ -46,6 +47,7 @@ export function AddAgentDialog({
 
   const submit = async () => {
     if (selected.size === 0 || submitting) return
+    setError(null)
     setSubmitting(true)
     try {
       const updated = await addAgentsToConversation(conversationId, Array.from(selected))
@@ -53,7 +55,7 @@ export function AddAgentDialog({
       setSelected(new Set())
       onOpenChange(false)
     } catch (err) {
-      console.error('[AddAgentDialog] failed', err)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSubmitting(false)
     }
@@ -65,7 +67,7 @@ export function AddAgentDialog({
         <DialogHeader>
           <DialogTitle>添加 Agent 到会话</DialogTitle>
           <DialogDescription>
-            为这个对话拉入更多 Agent。加入后会话会从单聊自动升级为群聊（如适用）。
+            群聊由一位主 Agent 回复，其他成员由主 Agent 委派。
           </DialogDescription>
         </DialogHeader>
 
@@ -105,6 +107,7 @@ export function AddAgentDialog({
           )}
         </div>
 
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         <DialogFooter>
           <div className="mr-auto text-xs text-muted-foreground">已选 {selected.size} 位</div>
           <Button variant="outline" onClick={() => onOpenChange(false)}>

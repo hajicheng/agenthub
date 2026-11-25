@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator
 
 from app.config import get_data_dir, get_db_path, get_workspaces_root
@@ -11,6 +13,26 @@ from app.db.bootstrap import bootstrap_database
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
+logger = logging.getLogger(__name__)
+
+
+def _recover_sandbox_paths(conn: sqlite3.Connection, workspaces_root: Path) -> None:
+    rows = conn.execute("SELECT conversation_id, root_path FROM workspaces WHERE mode = 'sandbox'").fetchall()
+    with conn:
+        for row in rows:
+            try:
+                if Path(row["root_path"]).is_dir():
+                    continue
+                current = workspaces_root / row["conversation_id"]
+                if current.parent != workspaces_root or current.resolve() != current:
+                    continue
+                current.mkdir(exist_ok=True)
+                conn.execute(
+                    "UPDATE workspaces SET root_path = ? WHERE conversation_id = ?",
+                    (str(current), row["conversation_id"]),
+                )
+            except OSError as exc:
+                logger.warning("Sandbox directory recovery failed for %s (%s)", row["conversation_id"], type(exc).__name__)
 
 
 def init_db(db_path: str | None = None) -> sqlite3.Connection:
@@ -31,6 +53,8 @@ def init_db(db_path: str | None = None) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
         bootstrap_database(conn)
+        if db_path is None:
+            _recover_sandbox_paths(conn, get_workspaces_root().resolve())
         _conn = conn
         return conn
 
@@ -129,6 +153,7 @@ def row_to_message(row: sqlite3.Row) -> dict[str, Any]:
         "parentMessageId": row["parent_message_id"],
         "mentionedAgentIds": parse_json(row["mentioned_agent_ids"], []),
         "runId": row["run_id"],
+        "parentRunId": row["parent_run_id"] if "parent_run_id" in row.keys() else None,
         "usage": parse_json(row["usage"], None),
         "createdAt": row["created_at"],
     }

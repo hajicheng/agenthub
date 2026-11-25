@@ -5,10 +5,15 @@ import json
 import time
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.adapters.registry import adapter_registry
 from app.adapters.types import AdapterAttachment, AdapterInput
 from app.db.client import db_read, db_tx, row_to_agent, row_to_message, row_to_workspace
 from app.ids import new_message_id, new_run_id
+from app.observability import Observation, trace_step
+from app.runner.orchestration_graph import DelegationContext, DelegationRequest, delegation_graph
+from app.services.artifact_service import get_artifact
 from app.services.attachment_service import get_attachment_absolute_path
 from app.services.context_compaction_service import (
     get_latest_context_summary,
@@ -19,17 +24,16 @@ from app.services.conversation_context import (
     extract_text_from_parts,
     get_pinned_messages_block,
 )
-from app.services.dispatch_plan import compile_dispatch_waves, validate_dispatch_plan
 from app.services.event_bus import event_bus
-from app.services.pending_stores import pending_dispatch_plans
 from app.services.workspace_utils import get_effective_cwd
+from app.tools.types import DelegationHandler, ToolResult
 
 
 class AgentRunner:
     def __init__(self) -> None:
         self._active_runs: dict[str, asyncio.Event] = {}
         self._child_runs: dict[str, set[str]] = {}
-        self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
     def start_run(
         self,
@@ -39,8 +43,6 @@ class AgentRunner:
         trigger_message_id: str,
         parent_run_id: str | None = None,
         override_prompt: str | None = None,
-        override_system_prompt: str | None = None,
-        override_tool_names: list[str] | None = None,
     ) -> str:
         run_id = new_run_id()
         abort_event = asyncio.Event()
@@ -48,19 +50,31 @@ class AgentRunner:
         if parent_run_id:
             self._child_runs.setdefault(parent_run_id, set()).add(run_id)
 
-        task = asyncio.create_task(
-            self._execute_run(
-                run_id=run_id,
-                abort_event=abort_event,
-                agent_id=agent_id,
+        async def execute() -> dict[str, Any]:
+            metadata = {"run_id": run_id, "agent_id": agent_id}
+            if parent_run_id:
+                metadata["parent_run_id"] = parent_run_id
+            with trace_step(
+                "agenthub.run",
+                as_type="agent",
                 conversation_id=conversation_id,
-                trigger_message_id=trigger_message_id,
-                parent_run_id=parent_run_id,
-                override_prompt=override_prompt,
-                override_system_prompt=override_system_prompt,
-                override_tool_names=override_tool_names,
-            )
-        )
+                metadata=metadata,
+                abort_event=abort_event,
+            ) as observation:
+                outcome = await self._execute_run(
+                    run_id=run_id,
+                    abort_event=abort_event,
+                    agent_id=agent_id,
+                    conversation_id=conversation_id,
+                    trigger_message_id=trigger_message_id,
+                    parent_run_id=parent_run_id,
+                    override_prompt=override_prompt,
+                    observation=observation,
+                )
+                observation.status = outcome["status"]
+                return outcome
+
+        task = asyncio.create_task(execute())
         self._tasks[run_id] = task
         return run_id
 
@@ -83,8 +97,7 @@ class AgentRunner:
         trigger_message_id: str,
         parent_run_id: str | None,
         override_prompt: str | None,
-        override_system_prompt: str | None,
-        override_tool_names: list[str] | None,
+        observation: Observation,
     ) -> dict[str, Any]:
         try:
             with db_read() as conn:
@@ -96,17 +109,20 @@ class AgentRunner:
                 ).fetchone()
 
             if not ag_row:
-                return self._finalize_run(run_id, conversation_id, agent_id, trigger_message_id, parent_run_id, "failed", f"Agent not found: {agent_id}")
+                return self._finalize_run(run_id, conversation_id, "failed", f"Agent not found: {agent_id}")
             if not ws_row:
-                return self._finalize_run(run_id, conversation_id, agent_id, trigger_message_id, parent_run_id, "failed", f"Workspace not found: {conversation_id}")
+                return self._finalize_run(run_id, conversation_id, "failed", f"Workspace not found: {conversation_id}")
             if not msg_row:
-                return self._finalize_run(run_id, conversation_id, agent_id, trigger_message_id, parent_run_id, "failed", f"Trigger message not found: {trigger_message_id}")
+                return self._finalize_run(run_id, conversation_id, "failed", f"Trigger message not found: {trigger_message_id}")
 
             agent = row_to_agent(ag_row)
             workspace = row_to_workspace(ws_row)
             trigger_msg = row_to_message(msg_row)
 
             prompt = override_prompt if override_prompt is not None else extract_text_from_parts(trigger_msg["parts"])
+            observation.input = prompt
+            if agent.get("apiKey"):
+                observation.secrets = (agent["apiKey"],)
             attachments: list[AdapterAttachment] = []
             if override_prompt is None:
                 for p in trigger_msg["parts"]:
@@ -145,8 +161,9 @@ class AgentRunner:
                 }
             )
 
+            outcome: dict[str, Any] = {}
             if agent["isOrchestrator"] and not parent_run_id:
-                result = await self._execute_orchestrator_run(
+                await self._execute_orchestrator_run(
                     run_id=run_id,
                     abort_event=abort_event,
                     agent=agent,
@@ -155,9 +172,10 @@ class AgentRunner:
                     trigger_message_id=trigger_message_id,
                     prompt=prompt,
                     attachments=attachments,
+                    observation=observation,
                 )
             else:
-                result = await self._execute_simple_run(
+                outcome = await self._execute_simple_run(
                     run_id=run_id,
                     abort_event=abort_event,
                     agent=agent,
@@ -166,22 +184,18 @@ class AgentRunner:
                     trigger_message_id=trigger_message_id,
                     prompt=prompt,
                     attachments=attachments,
-                    override_system_prompt=override_system_prompt,
-                    override_tool_names=override_tool_names,
+                    parent_run_id=parent_run_id,
+                    observation=observation,
                 )
 
             status = "aborted" if abort_event.is_set() else "complete"
-            return self._finalize_run(
-                run_id, conversation_id, agent_id, trigger_message_id, parent_run_id, status, None, result
-            )
+            return self._finalize_run(run_id, conversation_id, status, None, outcome)
         except Exception as exc:
             status = "aborted" if abort_event.is_set() else "failed"
             err_msg = None if status == "aborted" else str(exc)
             if err_msg:
-                self._emit_error_message(conversation_id, agent_id, run_id, err_msg)
-            return self._finalize_run(
-                run_id, conversation_id, agent_id, trigger_message_id, parent_run_id, status, err_msg
-            )
+                self._emit_error_message(conversation_id, agent_id, run_id, err_msg, parent_run_id)
+            return self._finalize_run(run_id, conversation_id, status, err_msg)
         finally:
             self._active_runs.pop(run_id, None)
             self._tasks.pop(run_id, None)
@@ -201,11 +215,13 @@ class AgentRunner:
         attachments: list[AdapterAttachment],
         tool_names: list[str],
         override_system_prompt: str | None = None,
+        isolated: bool = False,
+        delegate_task: DelegationHandler | None = None,
     ) -> AdapterInput:
         cwd = get_effective_cwd(workspace)
-        summary = get_latest_context_summary(conversation_id)
+        summary = None if isolated else get_latest_context_summary(conversation_id)
         summary_block = render_conversation_summary_block(summary)
-        pinned_block = get_pinned_messages_block(conversation_id)
+        pinned_block = "" if isolated else get_pinned_messages_block(conversation_id)
 
         sys_parts = [override_system_prompt or agent["systemPrompt"]]
         sys_parts.append(
@@ -216,7 +232,7 @@ class AgentRunner:
         if summary_block:
             sys_parts.append(summary_block)
 
-        history = build_history_for(
+        history = [] if isolated else build_history_for(
             conversation_id=conversation_id,
             current_agent_id=agent["id"],
             exclude_message_id=trigger_message_id,
@@ -238,6 +254,7 @@ class AgentRunner:
             history=history,
             model_provider=agent.get("modelProvider"),
             supports_vision=bool(agent.get("supportsVision")),
+            delegate_task=delegate_task,
         )
 
     async def _execute_simple_run(
@@ -251,10 +268,15 @@ class AgentRunner:
         trigger_message_id: str,
         prompt: str,
         attachments: list[AdapterAttachment],
+        observation: Observation,
         override_system_prompt: str | None = None,
         override_tool_names: list[str] | None = None,
+        parent_run_id: str | None = None,
+        delegate_task: DelegationHandler | None = None,
     ) -> dict[str, Any]:
-        tool_names = override_tool_names if override_tool_names is not None else list(agent["toolNames"])
+        tool_names = override_tool_names if override_tool_names is not None else [
+            name for name in agent["toolNames"] if name not in ("plan_tasks", "delegate_task")
+        ]
         adapter = adapter_registry.get_adapter(agent)
         inp = self._build_adapter_input(
             run_id=run_id,
@@ -266,8 +288,12 @@ class AgentRunner:
             attachments=attachments,
             tool_names=tool_names,
             override_system_prompt=override_system_prompt,
+            isolated=parent_run_id is not None,
+            delegate_task=delegate_task,
         )
-        return await self._consume_stream(adapter.stream(inp, abort_event), agent["id"], run_id, conversation_id)
+        return await self._consume_stream(
+            adapter.stream(inp, abort_event), agent["id"], run_id, conversation_id, parent_run_id, observation
+        )
 
     async def _execute_orchestrator_run(
         self,
@@ -280,7 +306,8 @@ class AgentRunner:
         trigger_message_id: str,
         prompt: str,
         attachments: list[AdapterAttachment],
-    ) -> dict[str, Any]:
+        observation: Observation,
+    ) -> None:
         with db_read() as conn:
             conv_row = conn.execute("SELECT agent_ids FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
             other_ids = [aid for aid in json.loads(conv_row["agent_ids"] or "[]") if aid != agent["id"]] if conv_row else []
@@ -289,18 +316,66 @@ class AgentRunner:
                 ph = ",".join("?" for _ in other_ids)
                 other_agents = [row_to_agent(r) for r in conn.execute(f"SELECT * FROM agents WHERE id IN ({ph})", other_ids).fetchall()]
 
-        roster_lines = [
-            f"- {a['id']} ({a['name']}): {a['description']} | capabilities={a['capabilities']}"
-            for a in other_agents
-        ]
-        plan_sys = (
-            agent["systemPrompt"]
-            + "\n\n当前群聊可用 Agent 列表：\n"
-            + ("\n".join(roster_lines) if roster_lines else "(无其他 Agent)")
+        workers = {worker["id"]: worker for worker in other_agents if not worker["isOrchestrator"]}
+        roster = "\n".join(
+            f"- {worker['id']} ({worker['name']}): {worker['description']} | "
+            f"capabilities={worker['capabilities']} | tools={worker['toolNames']}"
+            for worker in workers.values()
+        )
+        system_prompt = (
+            agent["systemPrompt"].replace("plan_tasks", "delegate_task")
+            + "\n\nYou are the only agent replying directly to the user. For a complex request, "
+            "delegate one self-contained assignment at a time with delegate_task. Wait for its result "
+            "and use it to decide what to do next. Consider the user's approval, rejection or revision "
+            "before requesting another assignment. Provide artifactIds when a worker needs existing artifacts. "
+            "Explain the final outcome yourself.\n\nAvailable workers:\n"
+            + (roster or "(none)")
         )
 
-        # Stage 1: PLAN
-        plan_res = await self._execute_simple_run(
+        async def delegate(args: dict[str, Any], message_id: str) -> ToolResult:
+            try:
+                request = DelegationRequest.model_validate(args)
+            except ValidationError:
+                return ToolResult(ok=False, error="delegate_task requires an agentId, a non-empty task and optional artifactIds.")
+            if request.agentId not in workers:
+                return ToolResult(ok=False, error=f"Worker is outside the available roster: {request.agentId}")
+            for artifact_id in request.artifactIds:
+                artifact = get_artifact(artifact_id)
+                if not artifact or artifact["conversationId"] != conversation_id:
+                    return ToolResult(ok=False, error=f"Artifact is unavailable in this conversation: {artifact_id}")
+
+            child_prompt = request.task
+            if request.artifactIds:
+                child_prompt += "\n\nUse read_artifact for these references: " + ", ".join(request.artifactIds)
+
+            def start_child() -> tuple[str, asyncio.Task[dict[str, Any]]]:
+                child_run_id = self.start_run(
+                    agent_id=request.agentId,
+                    conversation_id=conversation_id,
+                    trigger_message_id=trigger_message_id,
+                    parent_run_id=run_id,
+                    override_prompt=child_prompt,
+                )
+                return child_run_id, self._tasks[child_run_id]
+
+            state = await delegation_graph.ainvoke(
+                {},
+                context=DelegationContext(
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent["id"],
+                    message_id=message_id,
+                    request=request,
+                    abort_event=abort_event,
+                    start_child=start_child,
+                ),
+            )
+            return ToolResult(ok=True, value=state["result"])
+
+        tool_names = ["ask_user", "fs_list", "fs_read", "read_artifact", "read_attachment"]
+        if workers:
+            tool_names.append("delegate_task")
+        await self._execute_simple_run(
             run_id=run_id,
             abort_event=abort_event,
             agent=agent,
@@ -309,113 +384,30 @@ class AgentRunner:
             trigger_message_id=trigger_message_id,
             prompt=prompt,
             attachments=attachments,
-            override_system_prompt=plan_sys,
-            override_tool_names=["plan_tasks", "ask_user", "fs_list", "fs_read", "read_artifact", "read_attachment"],
-        )
-
-        plan_tasks = plan_res.get("plannedTasks")
-        if not plan_tasks or abort_event.is_set():
-            return plan_res
-
-        valid_ids = {a["id"] for a in other_agents}
-        ok, err = validate_dispatch_plan(plan_tasks, valid_ids)
-        if not ok:
-            self._emit_error_message(conversation_id, agent["id"], run_id, f"Invalid dispatch plan: {err}")
-            return plan_res
-
-        # Publish plan and await user approval if needed
-        event_bus.publish(
-            {
-                "type": "dispatch.plan",
-                "conversationId": conversation_id,
-                "timestamp": int(time.time() * 1000),
-                "runId": run_id,
-                "plan": plan_tasks,
-            }
-        )
-
-        # Stage 2: EXECUTE DAG waves
-        waves = compile_dispatch_waves(plan_tasks)
-        task_summaries: list[str] = []
-        for wave in waves:
-            if abort_event.is_set():
-                break
-
-            async def _run_child(item: dict[str, Any]) -> None:
-                child_run_id = self.start_run(
-                    agent_id=item["agentId"],
-                    conversation_id=conversation_id,
-                    trigger_message_id=trigger_message_id,
-                    parent_run_id=run_id,
-                    override_prompt=item["task"],
-                )
-                event_bus.publish(
-                    {
-                        "type": "dispatch.start",
-                        "conversationId": conversation_id,
-                        "timestamp": int(time.time() * 1000),
-                        "parentRunId": run_id,
-                        "childRunId": child_run_id,
-                        "taskId": item["id"],
-                        "agentId": item["agentId"],
-                    }
-                )
-                child_task = self._tasks.get(child_run_id)
-                child_res = await child_task if child_task else {"status": "complete"}
-                end_status = child_res.get("status", "complete")
-                event_bus.publish(
-                    {
-                        "type": "dispatch.end",
-                        "conversationId": conversation_id,
-                        "timestamp": int(time.time() * 1000),
-                        "parentRunId": run_id,
-                        "childRunId": child_run_id,
-                        "taskId": item["id"],
-                        "status": end_status,
-                        **({"error": child_res["error"]} if child_res.get("error") else {}),
-                    }
-                )
-                task_summaries.append(f"- Task {item['id']} ({item['agentId']}): {end_status}")
-
-            await asyncio.gather(*(_run_child(item) for item in wave))
-
-        if abort_event.is_set():
-            return plan_res
-
-        # Stage 3: AGGREGATE
-        agg_prompt = (
-            f"原始需求：{prompt}\n\n子任务执行结果：\n"
-            + "\n".join(task_summaries)
-            + "\n\n请简洁总结关键结论、产物位置与下一步建议。"
-        )
-        return await self._execute_simple_run(
-            run_id=run_id,
-            abort_event=abort_event,
-            agent=agent,
-            workspace=workspace,
-            conversation_id=conversation_id,
-            trigger_message_id=trigger_message_id,
-            prompt=agg_prompt,
-            attachments=[],
-            override_tool_names=["read_artifact", "fs_read"],
+            observation=observation,
+            override_system_prompt=system_prompt,
+            override_tool_names=tool_names,
+            delegate_task=delegate if workers else None,
         )
 
     async def _consume_stream(
-        self, stream, agent_id: str, run_id: str, conversation_id: str
+        self, stream, agent_id: str, run_id: str, conversation_id: str,
+        parent_run_id: str | None, observation: Observation,
     ) -> dict[str, Any]:
         parts_by_msg: dict[str, list[dict[str, Any]]] = {}
         artifact_ids: list[str] = []
-        output_msg_ids: list[str] = []
-        planned_tasks: list[dict[str, Any]] | None = None
+        summary = ""
+        delegation_calls: set[tuple[str, str]] = set()
         current_msg_id: str | None = None
 
         async for ev in stream:
             etype = ev.get("type")
             if etype == "message.start":
+                if parent_run_id:
+                    ev = {**ev, "parentRunId": parent_run_id}
                 mid = ev["messageId"]
                 current_msg_id = mid
                 parts_by_msg[mid] = []
-                output_msg_ids.append(mid)
                 now = ev["timestamp"]
                 with db_tx() as conn:
                     conn.execute(
@@ -454,10 +446,9 @@ class AgentRunner:
                         "args": ev.get("args"),
                     }
                 )
-                if ev["toolName"] == "plan_tasks" and isinstance(ev.get("args"), dict):
-                    tasks = ev["args"].get("tasks")
-                    if isinstance(tasks, list):
-                        planned_tasks = tasks
+                if ev["toolName"] == "delegate_task":
+                    delegation_calls.add((mid, ev["callId"]))
+                    self._save_streaming_parts(mid, parts)
 
             elif etype == "tool.result":
                 mid = ev["messageId"]
@@ -470,6 +461,9 @@ class AgentRunner:
                         "isError": bool(ev.get("isError")),
                     }
                 )
+
+                if (mid, ev["callId"]) in delegation_calls:
+                    self._save_streaming_parts(mid, parts)
 
             elif etype == "artifact.create":
                 art = ev.get("artifact") or {}
@@ -505,6 +499,12 @@ class AgentRunner:
             elif etype == "message.end":
                 mid = ev["messageId"]
                 parts = parts_by_msg.get(mid, [])
+                if parent_run_id or observation.capture_content:
+                    text = extract_text_from_parts(parts)
+                    if text and observation.capture_content:
+                        observation.output = text
+                    if parent_run_id:
+                        summary = text[:4000] or summary
                 with db_tx() as conn:
                     conn.execute(
                         "UPDATE messages SET parts = ?, status = 'complete' WHERE id = ?",
@@ -520,13 +520,18 @@ class AgentRunner:
 
             event_bus.publish(ev)
 
-        return {
-            "artifactIds": artifact_ids,
-            "outputMessageIds": output_msg_ids,
-            "plannedTasks": planned_tasks,
-        }
+        return {"artifactIds": artifact_ids, "summary": summary}
 
-    def _emit_error_message(self, conversation_id: str, agent_id: str, run_id: str, error: str) -> None:
+    def _save_streaming_parts(self, message_id: str, parts: list[dict[str, Any]]) -> None:
+        with db_tx() as conn:
+            conn.execute(
+                "UPDATE messages SET parts = ? WHERE id = ?",
+                (json.dumps(parts, ensure_ascii=False), message_id),
+            )
+
+    def _emit_error_message(
+        self, conversation_id: str, agent_id: str, run_id: str, error: str, parent_run_id: str | None
+    ) -> None:
         now = int(time.time() * 1000)
         mid = new_message_id()
         parts = [{"type": "text", "content": f"❌ 运行失败：{error}"}]
@@ -540,6 +545,7 @@ class AgentRunner:
             "parentMessageId": None,
             "mentionedAgentIds": [],
             "runId": run_id,
+            "parentRunId": parent_run_id,
             "usage": None,
             "createdAt": now,
         }
@@ -564,12 +570,9 @@ class AgentRunner:
         self,
         run_id: str,
         conversation_id: str,
-        agent_id: str,
-        trigger_message_id: str,
-        parent_run_id: str | None,
         status: str,
         error: str | None,
-        result: dict[str, Any] | None = None,
+        outcome: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = int(time.time() * 1000)
         with db_tx() as conn:
@@ -592,7 +595,7 @@ class AgentRunner:
                 **({"error": error} if error else {}),
             }
         )
-        return {"runId": run_id, "status": status, "error": error, **(result or {})}
+        return {"status": status, "error": error, **(outcome or {})}
 
 
 agent_runner = AgentRunner()

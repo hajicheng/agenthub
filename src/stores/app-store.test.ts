@@ -21,7 +21,7 @@ function resetStore(): void {
     artifacts: {},
     messageIdsByConv: {},
     runsByConv: {},
-    dispatchesByRunId: {},
+    dispatches: {},
     activeConversationId: null,
     previewArtifactId: null,
     fileExplorerOpen: false,
@@ -67,13 +67,13 @@ describe('app-store dispatch plan binding', () => {
         msg_plan: agentMessage('msg_plan', 'run_orch', 1),
         msg_extra: agentMessage('msg_extra', 'run_orch', 2),
       },
-      dispatchesByRunId: {
+      dispatches: {
         run_orch: {
           runId: 'run_orch',
+          conversationId: 'conv_1',
           messageId: 'msg_plan',
           plan: PLAN,
           taskStatus: { task_frontend: 'pending' },
-          childRunIds: {},
           reviewStatus: 'pending',
           pendingPlanId: 'pdp_1',
         },
@@ -100,7 +100,7 @@ describe('app-store dispatch plan binding', () => {
       },
     })
 
-    expect(useAppStore.getState().dispatchesByRunId.run_orch?.messageId).toBe('')
+    expect(useAppStore.getState().dispatches.run_orch?.messageId).toBe('')
 
     useAppStore.getState().applyEvent({
       type: 'message.start',
@@ -112,8 +112,30 @@ describe('app-store dispatch plan binding', () => {
     })
 
     const state = useAppStore.getState()
-    expect(state.dispatchesByRunId.run_orch?.messageId).toBe('msg_plan')
+    expect(state.dispatches.run_orch?.messageId).toBe('msg_plan')
     expect(selectDispatchForMessage(state, 'msg_plan')?.pendingPlanId).toBe('pdp_1')
+  })
+
+  it('keeps successive delegations of the same lead run on their own messages', () => {
+    const store = useAppStore.getState()
+    const base = { conversationId: 'conv_1', timestamp: 1 }
+    store.applyEvent({ ...base, type: 'dispatch.plan', runId: 'run_orch', messageId: 'msg_a', plan: PLAN })
+    store.applyEvent({
+      ...base, type: 'dispatch.end', parentRunId: 'run_orch', messageId: 'msg_a',
+      taskId: PLAN[0].id, childRunId: 'child_a', status: 'complete',
+    })
+    store.applyEvent({
+      ...base, type: 'dispatch.plan.pending',
+      pendingPlan: {
+        id: 'pdp_b', conversationId: 'conv_1', agentId: 'ag_orchestrator', runId: 'run_orch',
+        messageId: 'msg_b', plan: PLAN, createdAt: 2,
+      },
+    })
+    const state = useAppStore.getState()
+    expect(selectDispatchForMessage(state, 'msg_a')).toMatchObject({
+      childRunId: 'child_a', taskStatus: { task_frontend: 'complete' },
+    })
+    expect(selectDispatchForMessage(state, 'msg_b')?.pendingPlanId).toBe('pdp_b')
   })
 })
 

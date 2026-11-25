@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
 from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
 
+from app.adapters.runtime_context import with_current_time
 from app.adapters.types import AdapterInput
 from app.ids import new_message_id
+from app.observability import trace_step
 from app.services.artifact_service import get_artifact
 from app.services.settings_service import get_effective_anthropic_base_url, get_effective_api_key
 from app.tools.registry import tool_registry
@@ -66,6 +69,7 @@ class ClaudeCodeAdapter:
             agent_id=inp.agent_id,
             run_id=inp.run_id,
             abort_event=abort_event,
+            delegate_task=inp.delegate_task,
         )
 
         messages: list[dict[str, Any]] = []
@@ -86,9 +90,10 @@ class ClaudeCodeAdapter:
             "lastInputTokens": 0,
         }
 
-        for _ in range(MAX_TURNS):
+        for turn in range(MAX_TURNS):
             if abort_event.is_set():
                 return
+            can_use_tools = inp.delegate_task is None or turn < MAX_TURNS - 1
             message_id = new_message_id()
             yield ev({"type": "message.start", "messageId": message_id, "agentId": inp.agent_id, "runId": inp.run_id})
 
@@ -97,33 +102,65 @@ class ClaudeCodeAdapter:
             text_buf = ""
             tool_uses: list[dict[str, Any]] = []
 
+            system_prompt = with_current_time(inp.system_prompt)
             req_kwargs: dict[str, Any] = {
                 "model": model_id,
                 "max_tokens": 8192,
-                "system": inp.system_prompt,
+                "system": system_prompt,
                 "messages": messages,
             }
-            if anthropic_tools:
+            if anthropic_tools and can_use_tools:
                 req_kwargs["tools"] = anthropic_tools
 
-            async with client.messages.stream(**req_kwargs) as stream:
-                async for text_delta in stream.text_stream:
-                    if abort_event.is_set():
-                        yield ev({"type": "message.end", "messageId": message_id})
-                        return
-                    if text_part_idx < 0:
-                        text_part_idx = next_part_idx
-                        next_part_idx += 1
-                        yield ev({"type": "part.start", "messageId": message_id, "partIndex": text_part_idx, "part": {"type": "text", "content": ""}})
-                    text_buf += text_delta
-                    yield ev({"type": "part.delta", "messageId": message_id, "partIndex": text_part_idx, "delta": {"type": "text.append", "text": text_delta}})
+            with trace_step(
+                "anthropic.messages",
+                as_type="generation",
+                model=model_id,
+                metadata={"provider": "anthropic"},
+                input=[{"role": "system", "content": system_prompt}, *messages],
+                secrets=(api_key,),
+                abort_event=abort_event,
+            ) as generation:
+                async with client.messages.stream(**req_kwargs) as stream:
+                    async for text_delta in stream.text_stream:
+                        if abort_event.is_set():
+                            generation.output = {"role": "assistant", "content": text_buf or None}
+                            yield ev({"type": "message.end", "messageId": message_id})
+                            return
+                        if text_part_idx < 0:
+                            text_part_idx = next_part_idx
+                            next_part_idx += 1
+                            yield ev({"type": "part.start", "messageId": message_id, "partIndex": text_part_idx, "part": {"type": "text", "content": ""}})
+                        text_buf += text_delta
+                        yield ev({"type": "part.delta", "messageId": message_id, "partIndex": text_part_idx, "delta": {"type": "text.append", "text": text_delta}})
 
-                final_msg = await stream.get_final_message()
+                    final_msg = await stream.get_final_message()
+
+                generation.model = getattr(final_msg, "model", None) or model_id
+                usage = getattr(final_msg, "usage", None)
+                generation.usage = {
+                    key: count
+                    for key, count in (
+                        ("input", getattr(usage, "input_tokens", None)),
+                        ("output", getattr(usage, "output_tokens", None)),
+                        ("cache_read_input_tokens", getattr(usage, "cache_read_input_tokens", None)),
+                        ("cache_creation_input_tokens", getattr(usage, "cache_creation_input_tokens", None)),
+                    )
+                    if isinstance(count, int) and count >= 0
+                }
+                assistant_blocks: list[dict[str, Any]] = []
+                for blk in final_msg.content:
+                    if blk.type == "text":
+                        assistant_blocks.append({"type": "text", "text": blk.text})
+                    elif blk.type == "tool_use":
+                        tu = {"type": "tool_use", "id": blk.id, "name": blk.name, "input": blk.input}
+                        assistant_blocks.append(tu)
+                        tool_uses.append(tu)
+                generation.output = {"role": "assistant", "content": assistant_blocks}
 
             if text_part_idx >= 0:
                 yield ev({"type": "part.end", "messageId": message_id, "partIndex": text_part_idx})
 
-            usage = getattr(final_msg, "usage", None)
             msg_usage = {"inputTokens": 0, "outputTokens": 0, "cacheReadTokens": 0}
             if usage:
                 inp_t = int(getattr(usage, "input_tokens", 0) or 0)
@@ -137,18 +174,9 @@ class ClaudeCodeAdapter:
                 run_usage["cacheReadTokens"] += cr
                 run_usage["lastInputTokens"] = inp_t
 
-            assistant_blocks: list[dict[str, Any]] = []
-            for blk in final_msg.content:
-                if blk.type == "text":
-                    assistant_blocks.append({"type": "text", "text": blk.text})
-                elif blk.type == "tool_use":
-                    tu = {"type": "tool_use", "id": blk.id, "name": blk.name, "input": blk.input}
-                    assistant_blocks.append(tu)
-                    tool_uses.append(tu)
-
             messages.append({"role": "assistant", "content": assistant_blocks})
 
-            if not tool_uses:
+            if not tool_uses or not can_use_tools:
                 if msg_usage["inputTokens"] > 0 or msg_usage["outputTokens"] > 0:
                     yield ev({"type": "message.usage", "messageId": message_id, "usage": msg_usage})
                 yield ev({"type": "message.end", "messageId": message_id})
@@ -156,9 +184,12 @@ class ClaudeCodeAdapter:
                 return
 
             tool_results_blocks: list[dict[str, Any]] = []
+            turn_context = replace(ctx, message_id=message_id)
             for tu in tool_uses:
+                if abort_event.is_set():
+                    break
                 yield ev({"type": "tool.call", "messageId": message_id, "callId": tu["id"], "toolName": tu["name"], "args": tu["input"]})
-                res = await tool_registry.execute(tu["name"], tu["input"], ctx)
+                res = await tool_registry.execute(tu["name"], tu["input"], turn_context)
                 val = res.value if res.ok else {"error": res.error}
                 yield ev({"type": "tool.result", "messageId": message_id, "callId": tu["id"], "result": val, "isError": not res.ok})
 

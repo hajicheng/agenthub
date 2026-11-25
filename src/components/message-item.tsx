@@ -1,11 +1,10 @@
 'use client'
 
-import { AtSign, CornerUpLeft, Loader2, Pencil, Pin, RotateCcw, Star, Trash2 } from 'lucide-react'
+import { CornerUpLeft, Loader2, Pencil, Pin, RotateCcw, Star, Trash2 } from 'lucide-react'
 import { memo, useState } from 'react'
 
-import { AgentAvatar } from '@/components/agent-avatar'
 import { AgentInfoPopover } from '@/components/agent-info-popover'
-import { DispatchPlanCard } from '@/components/dispatch-plan-card'
+import { DispatchPlanCard, getDelegationCall } from '@/components/dispatch-plan-card'
 import { EditMessageInput } from '@/components/edit-message-input'
 import { PartList } from '@/components/message-parts'
 import { QuotedMessage } from '@/components/quoted-message'
@@ -34,6 +33,12 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
   const agentsMap = useAppStore((s) => s.agents)
   const agent = message.agentId ? agentsMap[message.agentId] : null
   const dispatch = useDispatchForMessage(message.id)
+  const delegation = getDelegationCall(message.parts)
+  const visibleParts = delegation
+    ? message.parts.filter((part) =>
+        (part.type !== 'tool_use' && part.type !== 'tool_result') || part.callId !== delegation.callId,
+      )
+    : message.parts
   const setReplyTarget = useAppStore((s) => s.setReplyTarget)
   const highlightMessage = useAppStore((s) => s.highlightMessage)
   const isHighlighted = useAppStore((s) => s.highlightedMessageId === message.id)
@@ -72,10 +77,6 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
         .map((p) => (p.type === 'text' ? p.content : ''))
         .join('\n')
     : ''
-
-  const mentionedAgents = message.mentionedAgentIds
-    .map((id) => agentsMap[id])
-    .filter(Boolean)
 
   const jumpToParent = () => {
     if (!parentMessage) return
@@ -254,28 +255,8 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
                 </div>
               )}
 
-              {/* @ 提及指示 */}
-              {mentionedAgents.length > 0 && (
-                <div className="mb-2 flex flex-wrap items-center gap-1 border-b border-border/50 pb-2">
-                  <AtSign className="size-3 text-muted-foreground" />
-                  {mentionedAgents.map((a) => (
-                    <span
-                      key={a.id}
-                      className="inline-flex items-center gap-1 rounded-full bg-primary/10 py-0.5 pl-1 pr-1.5 text-[10px] text-primary"
-                    >
-                      <AgentAvatar agent={a} size="xs" />
-                      <span>{a.name}</span>
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              <PartList parts={message.parts} conversationId={message.conversationId} />
-              {dispatch && (
-                <div className="mt-3">
-                  <DispatchPlanCard conversationId={message.conversationId} dispatch={dispatch} />
-                </div>
-              )}
+              <PartList parts={visibleParts} conversationId={message.conversationId} />
+              <DispatchPlanCard message={message} dispatch={dispatch} />
             </>
           )}
         </div>
@@ -323,7 +304,7 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
                   onClick={() => setEditing(true)}
                   disabled={busy}
                   className="transition hover:text-foreground disabled:opacity-30"
-                  title="编辑文字并重发（@ 和附件保持不变）"
+                  title="编辑文字并重发（保留附件）"
                 >
                   <Pencil className="size-3.5" />
                 </button>

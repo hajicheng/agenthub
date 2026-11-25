@@ -1,7 +1,7 @@
 import type { StreamEvent } from '@/shared/types'
 
 export interface QueuedStreamEvent {
-  /** SSE lastEventId，格式 `<bootId>-<seq>`（见 src/server/event-bus.ts） */
+  /** SSE lastEventId，格式 `<bootId>-<seq>`（见 backend/app/services/event_bus.py） */
   id: string
   event: StreamEvent
 }
