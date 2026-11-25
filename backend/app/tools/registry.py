@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -237,17 +238,20 @@ async def _bash_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
     try:
         if IS_WINDOWS:
-            proc = await asyncio.create_subprocess_exec(
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                command,
+            # Uvicorn reload uses a Windows Selector loop without asyncio subprocess support.
+            completed = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                    "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); "
+                    + command,
+                ],
                 cwd=cwd,
                 env=child_env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                capture_output=True,
+                timeout=timeout_s,
             )
+            stdout, stderr, exit_code = completed.stdout, completed.stderr, completed.returncode
         else:
             proc = await asyncio.create_subprocess_shell(
                 command,
@@ -256,20 +260,24 @@ async def _bash_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return ToolResult(ok=False, error=f"Command timed out after {int(timeout_s)}s")
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            except TimeoutError:
+                proc.kill()
+                raise
+            exit_code = proc.returncode
         out_str = stdout.decode("utf-8", errors="replace")[:MAX_BASH_OUTPUT_CHARS]
         err_str = stderr.decode("utf-8", errors="replace")[:MAX_BASH_OUTPUT_CHARS]
         return ToolResult(
-            ok=proc.returncode == 0,
-            value={"exitCode": proc.returncode, "stdout": out_str, "stderr": err_str, "cwd": cwd},
-            error=None if proc.returncode == 0 else (err_str or f"Exited with code {proc.returncode}"),
+            ok=exit_code == 0,
+            value={"exitCode": exit_code, "stdout": out_str, "stderr": err_str, "cwd": cwd},
+            error=None if exit_code == 0 else (err_str.strip() or f"Exited with code {exit_code}"),
         )
+    except (TimeoutError, subprocess.TimeoutExpired):
+        return ToolResult(ok=False, error=f"Command timed out after {int(timeout_s)}s")
     except Exception as exc:
-        return ToolResult(ok=False, error=str(exc))
+        shell = "PowerShell" if IS_WINDOWS else "workspace shell"
+        return ToolResult(ok=False, error=f"{shell} execution failed: {str(exc) or type(exc).__name__}")
 
 
 async def _delegate_task_handler(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -405,7 +413,12 @@ class ToolRegistry:
             ),
             ToolDefinition(
                 name="bash",
-                description="Run a shell command inside the workspace.",
+                description=(
+                    "Run a command inside the workspace with Windows PowerShell 5.1. "
+                    "Use PowerShell syntax. For conditional execution, use if ($?) or "
+                    "check $LASTEXITCODE after a native command."
+                    if IS_WINDOWS else "Run a shell command inside the workspace."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {
