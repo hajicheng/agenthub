@@ -1,7 +1,6 @@
-import { ArtifactPreviewPanel } from '@/components/artifact-preview-panel'
 import { ChatPanel } from '@/components/chat-panel'
-import { FileExplorerPanel } from '@/components/file-explorer-panel'
 import { MessageHighlightLayer } from '@/components/message-highlight-layer'
+import { RightPanels } from '@/components/right-panels'
 import { SelectionPopover } from '@/components/selection-popover'
 import { Sidebar } from '@/components/sidebar'
 
@@ -10,8 +9,7 @@ export default function Home() {
     <div className="flex h-screen overflow-hidden bg-background">
       <Sidebar />
       <ChatPanel />
-      <FileExplorerPanel />
-      <ArtifactPreviewPanel />
+      <RightPanels />
       <SelectionPopover />
       <MessageHighlightLayer />
     </div>

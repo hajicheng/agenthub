@@ -1,14 +1,14 @@
 'use client'
 
 import { Filter, ListTree, MessageSquare, Star } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
 import type { MessageRow } from '@/db/schema'
 import { toggleMessageBookmark } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { useAppStore, useMessagesForConversation } from '@/stores/app-store'
+import { useAppStore, useUserMessagesForConversation } from '@/stores/app-store'
 
 /**
  * ConversationOutline —— ChatPanel header 的「目录」按钮。
@@ -17,8 +17,8 @@ import { useAppStore, useMessagesForConversation } from '@/stores/app-store'
  * 每条 item 右侧有 ☆ 按钮可收藏到 conversation.bookmarkedMessageIds —— 纯 UI 书签，
  * 仅用于导航定位，不影响 LLM 上下文（与独立的 pinnedMessageIds 区分，详见 spec 01）。
  */
-export function ConversationOutline({ conversationId }: { conversationId: string }) {
-  const messages = useMessagesForConversation(conversationId)
+function ConversationOutlineImpl({ conversationId }: { conversationId: string }) {
+  const userMessages = useUserMessagesForConversation(conversationId)
   const highlightMessage = useAppStore((s) => s.highlightMessage)
   const conversation = useAppStore((s) => s.conversations[conversationId])
   const setBookmarkedMessageIds = useAppStore((s) => s.setBookmarkedMessageIds)
@@ -33,9 +33,14 @@ export function ConversationOutline({ conversationId }: { conversationId: string
   const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const userMessages = messages.filter((m) => m.role === 'user')
-  const filtered = onlyStarred ? userMessages.filter((m) => bookmarkedIds.has(m.id)) : userMessages
-  const starredCount = userMessages.filter((m) => bookmarkedIds.has(m.id)).length
+  const filtered = useMemo(
+    () => (onlyStarred ? userMessages.filter((m) => bookmarkedIds.has(m.id)) : userMessages),
+    [bookmarkedIds, onlyStarred, userMessages],
+  )
+  const starredCount = useMemo(
+    () => userMessages.filter((m) => bookmarkedIds.has(m.id)).length,
+    [bookmarkedIds, userMessages],
+  )
   const latestVisibleId = filtered[filtered.length - 1]?.id ?? null
   const activeId = filtered.some((m) => m.id === activeOutlineId) ? activeOutlineId : latestVisibleId
 
@@ -89,10 +94,11 @@ export function ConversationOutline({ conversationId }: { conversationId: string
       >
         <ListTree className="size-4" />
       </PopoverTrigger>
-      <PopoverContent
-        className="flex max-h-[calc(100vh-6rem)] w-[min(calc(100vw-2rem),24rem)] gap-0 overflow-hidden p-0 sm:max-h-[70vh]"
-        align="end"
-      >
+      {open && (
+        <PopoverContent
+          className="flex max-h-[calc(100vh-6rem)] w-[min(calc(100vw-2rem),24rem)] gap-0 overflow-hidden p-0 sm:max-h-[70vh]"
+          align="end"
+        >
         <div className="flex shrink-0 items-center justify-between border-b px-3 py-2 text-xs">
           <span className="flex items-center gap-1.5 font-medium">
             <ListTree className="size-3.5" />
@@ -148,10 +154,14 @@ export function ConversationOutline({ conversationId }: { conversationId: string
           <div className="pointer-events-none absolute inset-x-0 top-0 h-4 bg-gradient-to-b from-popover to-transparent" />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-gradient-to-t from-popover to-transparent" />
         </div>
-      </PopoverContent>
+        </PopoverContent>
+      )}
     </Popover>
   )
 }
+
+export const ConversationOutline = memo(ConversationOutlineImpl)
+ConversationOutline.displayName = 'ConversationOutline'
 
 function OutlineItem({
   index,

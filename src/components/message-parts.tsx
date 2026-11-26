@@ -2,7 +2,7 @@
 
 import { Check, ChevronDown, ChevronRight, Copy, Download, ExternalLink, FileText, FolderGit2, Image as ImageIcon, Layers, Loader2, Package, Presentation, Rocket, Sparkles, Terminal, XCircle } from 'lucide-react'
 import type { KeyboardEvent, MouseEvent, ReactNode } from 'react'
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 
 import { Card, CardContent } from '@/components/ui/card'
 import { AttachmentChip } from '@/components/attachment-chip'
@@ -17,46 +17,61 @@ import type { MessagePart } from '@/shared/types'
 import { useAppStore } from '@/stores/app-store'
 
 // ─── PartList: 调度入口 ─────────────────────────────────
-export function PartList({
+type ClusterItem =
+  | { kind: 'part'; part: MessagePart; index: number }
+  | { kind: 'cluster'; tools: Array<{ part: Extract<MessagePart, { type: 'tool_use' }>; index: number }> }
+
+function PartListImpl({
   parts,
   conversationId,
+  isStreaming = false,
 }: {
   parts: MessagePart[]
   conversationId: string
+  isStreaming?: boolean
 }) {
-  // 把 tool_result 按 callId 提前到对应 tool_use 的状态里
-  const resultByCallId = new Map<string, { result: unknown; isError: boolean }>()
-  for (const p of parts) {
-    if (p.type === 'tool_result') {
-      resultByCallId.set(p.callId, { result: p.result, isError: p.isError })
-    }
-  }
-
-  // 把 parts 重新折叠：连续的 tool_use 合并为一个 cluster；tool_result 跳过（已合到 tool_use）
-  type ClusterItem =
-    | { kind: 'part'; part: MessagePart; index: number }
-    | { kind: 'cluster'; tools: Array<{ part: Extract<MessagePart, { type: 'tool_use' }>; index: number }> }
-  const clusters: ClusterItem[] = []
-  let currentCluster: Extract<ClusterItem, { kind: 'cluster' }> | null = null
-  parts.forEach((p, i) => {
-    if (p.type === 'tool_result') return // 已合并到 tool_use 内
-    if (p.type === 'tool_use') {
-      if (!currentCluster) {
-        currentCluster = { kind: 'cluster', tools: [] }
-        clusters.push(currentCluster)
+  // 把 tool_result 按 callId 提前到对应 tool_use 的状态里，并折叠连续的 tool_use
+  const { resultByCallId, clusters } = useMemo(() => {
+    const results = new Map<string, { result: unknown; isError: boolean }>()
+    for (const p of parts) {
+      if (p.type === 'tool_result') {
+        results.set(p.callId, { result: p.result, isError: p.isError })
       }
-      currentCluster.tools.push({ part: p, index: i })
-    } else {
-      currentCluster = null
-      clusters.push({ kind: 'part', part: p, index: i })
     }
-  })
+
+    const grouped: ClusterItem[] = []
+    let currentCluster: Extract<ClusterItem, { kind: 'cluster' }> | null = null
+    parts.forEach((p, i) => {
+      if (p.type === 'tool_result') return // 已合并到 tool_use 内
+      if (p.type === 'tool_use') {
+        if (!currentCluster) {
+          currentCluster = { kind: 'cluster', tools: [] }
+          grouped.push(currentCluster)
+        }
+        currentCluster.tools.push({ part: p, index: i })
+      } else {
+        currentCluster = null
+        grouped.push({ kind: 'part', part: p, index: i })
+      }
+    })
+
+    return { resultByCallId: results, clusters: grouped }
+  }, [parts])
+
+  const lastClusterIndex = clusters.length - 1
 
   return (
     <div className="space-y-2">
       {clusters.map((c, i) => {
         if (c.kind === 'part') {
-          return <PartRenderer key={`p-${c.index}`} part={c.part} conversationId={conversationId} />
+          return (
+            <PartRenderer
+              key={`p-${c.index}`}
+              part={c.part}
+              conversationId={conversationId}
+              isStreaming={isStreaming && i === lastClusterIndex}
+            />
+          )
         }
         // tool cluster
         if (c.tools.length === 1) {
@@ -84,20 +99,25 @@ export function PartList({
   )
 }
 
-function PartRenderer({
+export const PartList = memo(PartListImpl)
+PartList.displayName = 'PartList'
+
+const PartRenderer = memo(function PartRenderer({
   part,
   conversationId,
+  isStreaming,
 }: {
   part: MessagePart
   conversationId: string
+  isStreaming: boolean
 }) {
   switch (part.type) {
     case 'text':
-      return <TextPart content={part.content} />
+      return <TextPart content={part.content} isStreaming={isStreaming} />
     case 'thinking':
       return <ThinkingPart content={part.content} />
     case 'code':
-      return <CodePart language={part.language} content={part.content} />
+      return <CodePart language={part.language} content={part.content} isStreaming={isStreaming} />
     case 'artifact_ref':
       return <ArtifactRefPart artifactId={part.artifactId} />
     case 'deploy_status':
@@ -121,26 +141,38 @@ function PartRenderer({
     default:
       return null
   }
-}
+})
 
 // ─── Text ──────────────────────────────────────────────
-function TextPart({ content }: { content: string }) {
+const TextPart = memo(function TextPart({
+  content,
+  isStreaming,
+}: {
+  content: string
+  isStreaming: boolean
+}) {
+  const segments = useMemo(
+    () => (content ? splitQuotedSelections(content) : []),
+    [content],
+  )
   if (!content) return null
   // 把消息体里 <quoted_selection ...>...</quoted_selection> 块抠出来，渲染成卡片；
   // 剩余文本走 Markdown。规避了纯文本里裸 XML 显丑的问题。
-  const segments = splitQuotedSelections(content)
+  const lastSeg = segments.length - 1
   return (
     <div className="space-y-2">
       {segments.map((seg, i) =>
         seg.kind === 'quote' ? (
           <QuotedSelectionCard key={i} {...seg} />
         ) : (
-          <Markdown key={i}>{seg.text}</Markdown>
+          <Markdown key={i} streaming={isStreaming && i === lastSeg}>
+            {seg.text}
+          </Markdown>
         ),
       )}
     </div>
   )
-}
+})
 
 interface QuotedSegment {
   kind: 'quote'
@@ -232,7 +264,15 @@ function QuotedSelectionCard({ source, artifactId, filePath, text }: QuotedSegme
 }
 
 // ─── Thinking（可折叠）──────────────────────────────────
-function ThinkingPart({ content }: { content: string }) {
+const THINKING_PREVIEW_CHARS = 240
+
+function getThinkingPreview(content: string): string {
+  // 折叠态只截取前一小段，避免 Blink 对上万字思考内容做整段 line-clamp 断行排版
+  if (content.length <= THINKING_PREVIEW_CHARS) return content
+  return content.slice(0, THINKING_PREVIEW_CHARS)
+}
+
+const ThinkingPart = memo(function ThinkingPart({ content }: { content: string }) {
   const [open, setOpen] = useState(false)
   if (!content) return null
   return (
@@ -244,7 +284,7 @@ function ThinkingPart({ content }: { content: string }) {
       <ChevronRight
         className={cn('mt-0.5 size-3.5 shrink-0 transition-transform', open && 'rotate-90')}
       />
-      <div className="flex-1">
+      <div className="min-w-0 flex-1">
         <div className="font-medium uppercase tracking-wide text-muted-foreground/70">思考</div>
         <div
           className={cn(
@@ -252,20 +292,28 @@ function ThinkingPart({ content }: { content: string }) {
             !open && 'line-clamp-1',
           )}
         >
-          {content}
+          {open ? content : getThinkingPreview(content)}
         </div>
       </div>
     </button>
   )
-}
+})
 
 // ─── Code ──────────────────────────────────────────────
-function CodePart({ language, content }: { language: string; content: string }) {
-  return <CodeBlock code={content} language={language} />
-}
+const CodePart = memo(function CodePart({
+  language,
+  content,
+  isStreaming,
+}: {
+  language: string
+  content: string
+  isStreaming: boolean
+}) {
+  return <CodeBlock code={content} language={language} streaming={isStreaming} />
+})
 
 // ─── ToolUse + 内嵌 result ──────────────────────────────
-function ToolUsePart({
+const ToolUsePart = memo(function ToolUsePart({
   toolName,
   args,
   callId,
@@ -382,7 +430,7 @@ function ToolUsePart({
       </CardContent>
     </Card>
   )
-}
+})
 
 function CommandPreview({ command, expanded }: { command: string; expanded: boolean }) {
   return (
@@ -557,7 +605,7 @@ function formatToolValue(value: unknown): string {
 }
 
 // ─── 连续 tool_use 折叠 cluster ────────────────────────
-function ToolCluster({
+const ToolCluster = memo(function ToolCluster({
   tools,
   resultByCallId,
 }: {
@@ -678,7 +726,7 @@ function ToolCluster({
       </CardContent>
     </Card>
   )
-}
+})
 
 function formatToolDistribution(counts: Map<string, number>): string {
   return Array.from(counts.entries())
@@ -687,7 +735,7 @@ function formatToolDistribution(counts: Map<string, number>): string {
 }
 
 // ─── ArtifactRef ───────────────────────────────────────
-function ArtifactRefPart({ artifactId }: { artifactId: string }) {
+const ArtifactRefPart = memo(function ArtifactRefPart({ artifactId }: { artifactId: string }) {
   const artifact = useAppStore((s) => s.artifacts[artifactId])
   const upsertArtifact = useAppStore((s) => s.upsertArtifact)
   const openPreview = useAppStore((s) => s.openArtifactPreview)
@@ -781,7 +829,7 @@ function ArtifactRefPart({ artifactId }: { artifactId: string }) {
       </CardContent>
     </Card>
   )
-}
+})
 
 function ArtifactIcon({ type }: { type: string }) {
   if (type === 'image') return <ImageIcon className="size-5 shrink-0 text-muted-foreground" />

@@ -241,3 +241,34 @@ describe('app-store run failure cleanup', () => {
     expect(message.parts.filter((part) => part.type === 'tool_result')).toHaveLength(1)
   })
 })
+
+describe('app-store batching and usage version tracking', () => {
+  beforeEach(() => {
+    resetStore()
+  })
+
+  it('applies batched stream events in order without bumping usageVersion on part.delta', () => {
+    const store = useAppStore.getState()
+    const base = { conversationId: 'conv_1', timestamp: 1 }
+
+    store.applyEvents([
+      { ...base, type: 'message.start', messageId: 'msg_1', agentId: 'ag_1', runId: 'run_1' },
+      { ...base, type: 'part.start', messageId: 'msg_1', partIndex: 0, part: { type: 'text', content: '' } },
+      { ...base, type: 'part.delta', messageId: 'msg_1', partIndex: 0, delta: { type: 'text.append', text: 'Hello ' } },
+      { ...base, type: 'part.delta', messageId: 'msg_1', partIndex: 0, delta: { type: 'text.append', text: 'world' } },
+    ])
+
+    const afterDeltas = useAppStore.getState()
+    expect(afterDeltas.messages.msg_1?.parts[0]).toEqual({ type: 'text', content: 'Hello world' })
+    expect(afterDeltas.usageVersionByConv.conv_1 ?? 0).toBe(0)
+
+    store.applyEvent({
+      ...base,
+      type: 'message.usage',
+      messageId: 'msg_1',
+      usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 20 },
+    })
+
+    expect(useAppStore.getState().usageVersionByConv.conv_1).toBe(1)
+  })
+})

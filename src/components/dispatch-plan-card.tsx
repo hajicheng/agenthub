@@ -1,7 +1,7 @@
 'use client'
 
 import { Loader2 } from 'lucide-react'
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { z } from 'zod'
 
 import { AgentAvatar } from '@/components/agent-avatar'
@@ -42,7 +42,7 @@ export function getDelegationCall(parts: MessagePart[]) {
   return assignment.success ? { ...assignment.data, callId: call.callId } : null
 }
 
-export function DispatchPlanCard({ message, dispatch }: { message: MessageRow; dispatch: DispatchState | null }) {
+function DispatchPlanCardImpl({ message, dispatch }: { message: MessageRow; dispatch: DispatchState | null }) {
   const assignment = getDelegationCall(message.parts)
   const task = dispatch?.plan[0] ?? (assignment ? { ...assignment, id: message.id } : undefined)
   const toolResult = message.parts.find(
@@ -118,3 +118,6 @@ export function DispatchPlanCard({ message, dispatch }: { message: MessageRow; d
     </Card>
   )
 }
+
+export const DispatchPlanCard = memo(DispatchPlanCardImpl)
+DispatchPlanCard.displayName = 'DispatchPlanCard'

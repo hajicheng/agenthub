@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 
 import { MessageItem } from '@/components/message-item'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -11,10 +11,22 @@ import { useAppStore, useMessagesForConversation } from '@/stores/app-store'
 const STICKY_BOTTOM_THRESHOLD_PX = 120
 const STREAM_SCROLL_THROTTLE_MS = 80
 
-export function MessageList({ conversationId }: { conversationId: string }) {
+function MessageListImpl({ conversationId }: { conversationId: string }) {
   const messages = useMessagesForConversation(conversationId)
   const setMessagesForConversation = useAppStore((s) => s.setMessagesForConversation)
   const messageIdsByConv = useAppStore((s) => s.messageIdsByConv[conversationId])
+
+  const { latestUserId, latestAgentId } = useMemo(() => {
+    let userId: string | null = null
+    let agentId: string | null = null
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (!userId && m.role === 'user') userId = m.id
+      if (!agentId && m.role === 'agent' && !m.parentRunId) agentId = m.id
+      if (userId && agentId) break
+    }
+    return { latestUserId: userId, latestAgentId: agentId }
+  }, [messages])
 
   const viewportRef = useRef<HTMLDivElement>(null)
   const scrollFrameRef = useRef<number | null>(null)
@@ -144,12 +156,20 @@ export function MessageList({ conversationId }: { conversationId: string }) {
     <ScrollArea className="min-h-0 flex-1" viewportRef={viewportRef}>
       <div className="space-y-4 p-4">
         {messages.map((m) => (
-          <MessageItem key={m.id} message={m} />
+          <MessageItem
+            key={m.id}
+            message={m}
+            isLatestUser={m.id === latestUserId}
+            isLatestAgent={m.id === latestAgentId}
+          />
         ))}
       </div>
     </ScrollArea>
   )
 }
+
+export const MessageList = memo(MessageListImpl)
+MessageList.displayName = 'MessageList'
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= STICKY_BOTTOM_THRESHOLD_PX

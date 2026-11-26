@@ -1,10 +1,10 @@
 'use client'
 
 import { Eye, Pencil, ShieldCheck, Sparkles, Wrench } from 'lucide-react'
-import { useState } from 'react'
+import dynamic from 'next/dynamic'
+import { memo, useState } from 'react'
 
 import { AgentAvatar } from '@/components/agent-avatar'
-import { CreateAgentDialog } from '@/components/create-agent-dialog'
 import {
   Popover,
   PopoverContent,
@@ -12,6 +12,11 @@ import {
 } from '@/components/ui/popover'
 import type { AgentRow } from '@/db/schema'
 import { cn } from '@/lib/utils'
+
+const CreateAgentDialog = dynamic(
+  () => import('@/components/create-agent-dialog').then((m) => m.CreateAgentDialog),
+  { ssr: false },
+)
 
 type Size = 'xs' | 'sm' | 'md' | 'lg'
 
@@ -21,7 +26,7 @@ type Size = 'xs' | 'sm' | 'md' | 'lg'
  * popover 内容：放大头像 + 名字 + 描述 + capabilities tags + 底层 model +
  * 各种 badge（内置 / Orchestrator / 视觉）+ 「编辑配置」按钮（打开 CreateAgentDialog）
  */
-export function AgentInfoPopover({
+function AgentInfoPopoverImpl({
   agent,
   size = 'md',
   className,
@@ -32,13 +37,14 @@ export function AgentInfoPopover({
   className?: string
   avatarClassName?: string
 }) {
+  const [popoverOpen, setPopoverOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
 
-  const providerLabel = providerName(agent.modelProvider)
+  const providerLabel = popoverOpen ? providerName(agent.modelProvider) : null
 
   return (
     <>
-      <Popover>
+      <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
         <PopoverTrigger
           className={cn(
             'inline-flex shrink-0 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
@@ -48,7 +54,8 @@ export function AgentInfoPopover({
         >
           <AgentAvatar agent={agent} size={size} className={avatarClassName} />
         </PopoverTrigger>
-        <PopoverContent className="w-80" align="start">
+        {popoverOpen && (
+          <PopoverContent className="w-80" align="start">
           {/* 头部：头像 + 名字 + 描述 */}
           <div className="flex items-start gap-3">
             <AgentAvatar agent={agent} size="lg" />
@@ -119,21 +126,25 @@ export function AgentInfoPopover({
           </div>
 
           {/* 编辑入口 */}
-          <button
-            type="button"
-            onClick={() => setEditOpen(true)}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md border bg-card px-2 py-1.5 text-xs font-medium transition hover:border-foreground/30 hover:bg-accent"
-          >
-            <Pencil className="size-3" />
-            编辑配置
-          </button>
-        </PopoverContent>
+            <button
+              type="button"
+              onClick={() => setEditOpen(true)}
+              className="flex w-full items-center justify-center gap-1.5 rounded-md border bg-card px-2 py-1.5 text-xs font-medium transition hover:border-foreground/30 hover:bg-accent"
+            >
+              <Pencil className="size-3" />
+              编辑配置
+            </button>
+          </PopoverContent>
+        )}
       </Popover>
 
-      <CreateAgentDialog open={editOpen} onOpenChange={setEditOpen} agent={agent} />
+      {editOpen && <CreateAgentDialog open={editOpen} onOpenChange={setEditOpen} agent={agent} />}
     </>
   )
 }
+
+export const AgentInfoPopover = memo(AgentInfoPopoverImpl)
+AgentInfoPopover.displayName = 'AgentInfoPopover'
 
 function Badge({
   tone = 'muted',

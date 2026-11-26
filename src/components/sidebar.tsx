@@ -1,16 +1,12 @@
 'use client'
 
-import { Archive, ArchiveRestore, BarChart3, Bot, ChevronDown, ChevronRight, Layers, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Plus, Search, Trash2, X } from 'lucide-react'
+import { Archive, ArchiveRestore, BarChart3, Bot, ChevronDown, ChevronRight, Layers, MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Plus, Search, Settings as SettingsIcon, Trash2, X } from 'lucide-react'
+import dynamic from 'next/dynamic'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { AgentLibrary } from '@/components/agent-library'
 import { AgentAvatar } from '@/components/agent-avatar'
 import { GlobalSearchTrigger } from '@/components/global-search-trigger'
-import { ArtifactLibrary } from '@/components/artifact-library'
-import { NewConversationDialog } from '@/components/new-conversation-dialog'
-import { SettingsButton } from '@/components/settings-dialog'
 import { ThemeToggle } from '@/components/theme-toggle'
-import { UsageDashboard } from '@/components/usage-dashboard'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import {
@@ -35,6 +31,27 @@ import { cn } from '@/lib/utils'
 import type { AgentRow, ConversationRow } from '@/db/schema'
 import { useAppStore, useConversationList, useUnreadCount } from '@/stores/app-store'
 
+const AgentLibrary = dynamic(
+  () => import('@/components/agent-library').then((m) => m.AgentLibrary),
+  { ssr: false },
+)
+const ArtifactLibrary = dynamic(
+  () => import('@/components/artifact-library').then((m) => m.ArtifactLibrary),
+  { ssr: false },
+)
+const NewConversationDialog = dynamic(
+  () => import('@/components/new-conversation-dialog').then((m) => m.NewConversationDialog),
+  { ssr: false },
+)
+const SettingsDialog = dynamic(
+  () => import('@/components/settings-dialog').then((m) => m.SettingsDialog),
+  { ssr: false },
+)
+const UsageDashboard = dynamic(
+  () => import('@/components/usage-dashboard').then((m) => m.UsageDashboard),
+  { ssr: false },
+)
+
 type Mode = 'conversations' | 'artifacts' | 'agents' | 'analytics'
 
 export function Sidebar() {
@@ -51,6 +68,7 @@ export function Sidebar() {
 
   const [mode, setMode] = useState<Mode>('conversations')
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -110,6 +128,10 @@ export function Sidebar() {
 
   useEffect(() => {
     return subscribeUiCommand((command) => {
+      if (command === 'open-settings') {
+        setSettingsOpen(true)
+        return
+      }
       if (command !== 'open-agents') return
       setCollapsed(false)
       setMode('agents')
@@ -167,7 +189,16 @@ export function Sidebar() {
           </div>
         )}
         <div className={cn('flex items-center', collapsed ? 'flex-col gap-1' : 'gap-0.5')}>
-          <SettingsButton />
+          <Button
+            size="icon"
+            variant="ghost"
+            className="group"
+            onClick={() => setSettingsOpen(true)}
+            title="API 设置"
+            aria-label="API 设置"
+          >
+            <SettingsIcon className="size-4 motion-safe:transition-transform motion-safe:duration-300 motion-safe:ease-out motion-safe:group-hover:rotate-45 motion-safe:group-active:scale-90" />
+          </Button>
           <ThemeToggle />
           <Button
             size="icon"
@@ -381,31 +412,34 @@ export function Sidebar() {
         !collapsed && <UsageDashboard />
       )}
 
-      <NewConversationDialog open={dialogOpen} onOpenChange={setDialogOpen} />
+      {dialogOpen && <NewConversationDialog open={dialogOpen} onOpenChange={setDialogOpen} />}
+      {settingsOpen && <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />}
 
-      <Dialog open={!!deleteTargetId} onOpenChange={(open) => !open && setDeleteTargetId(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除会话</DialogTitle>
-            <DialogDescription>
-              确定要删除「{deleteTarget?.title}」吗？该会话的所有消息、产物和工作区都会一并清除，无法恢复。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTargetId(null)}>
-              取消
-            </Button>
-            <Button
-              variant="default"
-              className="bg-red-600 hover:bg-red-700"
-              onClick={() => void confirmDelete()}
-              disabled={deleting}
-            >
-              {deleting ? '删除中...' : '删除'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {!!deleteTargetId && (
+        <Dialog open={!!deleteTargetId} onOpenChange={(open) => !open && setDeleteTargetId(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>删除会话</DialogTitle>
+              <DialogDescription>
+                确定要删除「{deleteTarget?.title}」吗？该会话的所有消息、产物和工作区都会一并清除，无法恢复。
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setDeleteTargetId(null)}>
+                取消
+              </Button>
+              <Button
+                variant="default"
+                className="bg-red-600 hover:bg-red-700"
+                onClick={() => void confirmDelete()}
+                disabled={deleting}
+              >
+                {deleting ? '删除中...' : '删除'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </aside>
     </>
   )

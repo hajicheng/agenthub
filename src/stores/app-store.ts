@@ -88,6 +88,9 @@ interface AppState {
   // ─── 未读计数（流式响应到达时，非 active 会话 +1；切到该会话清零）
   unreadByConv: Record<string, number>
 
+  // ─── 每会话消息 usage 变更版本（避免 UsageBadge 订阅整张 messages 表而在每个 delta 重算）
+  usageVersionByConv: Record<string, number>
+
   // ─── 移动端 sidebar 抽屉开关 ──
   mobileSidebarOpen: boolean
 
@@ -169,6 +172,7 @@ interface AppState {
   replaceLocalMessageId(tempId: string, realId: string): void
 
   applyEvent(event: StreamEvent): void
+  applyEvents(events: StreamEvent[]): void
 }
 
 export const useAppStore = create<AppState>()(
@@ -191,6 +195,7 @@ export const useAppStore = create<AppState>()(
     pendingBashCommandsByConv: {},
     pendingQuestionsByConv: {},
     unreadByConv: {},
+    usageVersionByConv: {},
     mobileSidebarOpen: false,
     pendingQuoteForInput: null,
     highlightedMessageId: null,
@@ -211,6 +216,7 @@ export const useAppStore = create<AppState>()(
           delete s.pendingWritesByConv[convId]
           delete s.pendingBashCommandsByConv[convId]
           delete s.pendingQuestionsByConv[convId]
+          bumpUsageVersion(s, convId)
         }
         // run.end 可能丢在缺口里；快照不含 run 状态，宁可去掉「运行中」也不让它永远转圈
         for (const runs of Object.values(s.runsByConv)) {
@@ -261,25 +267,33 @@ export const useAppStore = create<AppState>()(
 
     setMessagesForConversation: (conversationId, list) =>
       set((s) => {
+        let usageChanged = false
         const nextIds = list.map((m) => m.id)
         if (!areStringArraysEqual(s.messageIdsByConv[conversationId], nextIds)) {
           s.messageIdsByConv[conversationId] = nextIds
+          usageChanged = true
         }
         for (const m of list) {
           const existing = s.messages[m.id]
           if (!existing || !areMessagesEquivalent(existing, m)) {
+            if (!existing || !areMessageUsageEqual(existing.usage, m.usage)) usageChanged = true
             s.messages[m.id] = m
           }
           attachDispatchToMessageForRun(s.dispatches, m.runId, m.id)
         }
+        if (usageChanged) bumpUsageVersion(s, conversationId)
       }),
 
     upsertMessage: (message) =>
       set((s) => {
+        const existing = s.messages[message.id]
         s.messages[message.id] = message
         const bucket = (s.messageIdsByConv[message.conversationId] ??= [])
         if (!bucket.includes(message.id)) bucket.push(message.id)
         attachDispatchToMessageForRun(s.dispatches, message.runId, message.id)
+        if (!existing || !areMessageUsageEqual(existing.usage, message.usage)) {
+          bumpUsageVersion(s, message.conversationId)
+        }
       }),
 
     setActiveConversation: (id) =>
@@ -382,6 +396,7 @@ export const useAppStore = create<AppState>()(
         if (replyId && toRemove.has(replyId)) {
           delete s.replyTargetByConv[conversationId]
         }
+        if (messageIds.length > 0) bumpUsageVersion(s, conversationId)
       }),
 
     clearConversationHistory: (conversationId, conversation) =>
@@ -400,6 +415,7 @@ export const useAppStore = create<AppState>()(
         delete s.pendingBashCommandsByConv[conversationId]
         delete s.pendingQuestionsByConv[conversationId]
         delete s.unreadByConv[conversationId]
+        bumpUsageVersion(s, conversationId)
         if (s.highlightedMessageId && messageIds.has(s.highlightedMessageId)) {
           s.highlightedMessageId = null
         }
@@ -556,8 +572,38 @@ export const useAppStore = create<AppState>()(
         }
       }),
 
-    applyEvent: (event) =>
+    applyEvent: (event) => {
+      if (event.type === 'heartbeat') return
       set((s) => {
+        applyEventDraft(s, event)
+      })
+    },
+
+    applyEvents: (events) => {
+      if (events.length === 0) return
+      let hasWork = false
+      for (const e of events) {
+        if (e.type !== 'heartbeat') {
+          hasWork = true
+          break
+        }
+      }
+      if (!hasWork) return
+      set((s) => {
+        for (const event of events) {
+          applyEventDraft(s, event)
+        }
+      })
+    },
+  })),
+)
+
+function bumpUsageVersion(s: AppState, conversationId: string): void {
+  s.usageVersionByConv ??= {}
+  s.usageVersionByConv[conversationId] = (s.usageVersionByConv[conversationId] ?? 0) + 1
+}
+
+function applyEventDraft(s: AppState, event: StreamEvent): void {
         switch (event.type) {
           case 'heartbeat':
             return
@@ -606,7 +652,10 @@ export const useAppStore = create<AppState>()(
 
           case 'message.usage': {
             const msg = s.messages[event.messageId]
-            if (msg) msg.usage = event.usage
+            if (msg) {
+              msg.usage = event.usage
+              bumpUsageVersion(s, event.conversationId)
+            }
             return
           }
 
@@ -656,6 +705,7 @@ export const useAppStore = create<AppState>()(
             if (!s.messageIdsByConv[event.message.conversationId].includes(event.message.id)) {
               s.messageIdsByConv[event.message.conversationId].push(event.message.id)
             }
+            if (event.message.usage) bumpUsageVersion(s, event.message.conversationId)
             return
           }
 
@@ -673,6 +723,7 @@ export const useAppStore = create<AppState>()(
               delete s.artifacts[id]
               if (s.previewArtifactId === id) s.previewArtifactId = null
             }
+            if (event.messageIds.length > 0) bumpUsageVersion(s, event.conversationId)
             return
           }
 
@@ -859,9 +910,7 @@ export const useAppStore = create<AppState>()(
           default:
             return
         }
-      }),
-  })),
-)
+}
 
 // ─── 派生 hooks ──────────────────────────────────────
 // 用 useShallow 防止派生数组每次新引用导致无限渲染（Zustand 5 标准做法）。
@@ -1048,6 +1097,16 @@ export const useMessagesForConversation = (conversationId: string) =>
     ),
   )
 
+/** 仅返回该会话的 user 消息，agent 流式 part.delta 不会触发 ConversationOutline 重渲染。 */
+export const useUserMessagesForConversation = (conversationId: string) =>
+  useAppStore(
+    useShallow((s) =>
+      (s.messageIdsByConv[conversationId] ?? [])
+        .map((id) => s.messages[id])
+        .filter((message) => message && message.role === 'user' && !message.parentRunId),
+    ),
+  )
+
 export const useChildMessages = (conversationId: string, childRunId?: string) =>
   useAppStore(
     useShallow((s) =>
@@ -1203,16 +1262,15 @@ export interface ConversationUsageTotal {
 export const useConversationUsageTotal = (conversationId: string | null): ConversationUsageTotal => {
   // 三个数据源：
   //   runs map —— streaming 时实时填，含 lastInputTokens / model / agentId（最准）
-  //   messages map —— 从 DB 加载（刷新页面后唯一可用）
+  //   messages map —— 从 DB 加载（刷新页面后唯一可用），通过 usageVersionByConv 触发重算避免每个 part.delta 重渲染
   //   agents map —— 取 model 兜底（messages 不存 model）
-  // 用 useMemo 派生统计，避免在 store selector 里返回新对象引用导致 useShallow 死循环。
   const runs = useAppStore((s) => (conversationId ? s.runsByConv[conversationId] : undefined))
-  const messageIds = useAppStore((s) =>
-    conversationId ? s.messageIdsByConv[conversationId] : undefined,
+  const usageVersion = useAppStore((s) =>
+    conversationId ? s.usageVersionByConv?.[conversationId] ?? 0 : 0,
   )
-  const messages = useAppStore((s) => s.messages)
   const agents = useAppStore((s) => s.agents)
   return useMemo(() => {
+    void usageVersion
     const result: ConversationUsageTotal = {
       inputTokens: 0,
       outputTokens: 0,
@@ -1247,31 +1305,36 @@ export const useConversationUsageTotal = (conversationId: string | null): Conver
       }
     }
 
-    if (!hasRunUsage && messageIds) {
-      // 走 messages 兜底：按 run_id 去重统计 runCount；按 message 累加 token；
-      // model 通过 agent.modelId 推断（messages 不存 model，跑过的模型若已切换无法准确还原）
-      const seenRuns = new Set<string>()
-      let latestMsgCreatedAt = -1
-      for (const mid of messageIds) {
-        const m = messages[mid]
-        if (!m || !m.usage || m.role !== 'agent') continue
-        const u = m.usage
-        result.inputTokens += u.inputTokens
-        result.outputTokens += u.outputTokens
-        result.cacheReadTokens += u.cacheReadTokens
-        if (m.runId && !seenRuns.has(m.runId)) {
-          seenRuns.add(m.runId)
-          result.runCount++
-        }
-        const sub = u.inputTokens + u.outputTokens
-        if (m.agentId) {
-          result.byAgent[m.agentId] = (result.byAgent[m.agentId] ?? 0) + sub
-          const modelId = agents[m.agentId]?.modelId
-          if (modelId) result.byModel[modelId] = (result.byModel[modelId] ?? 0) + sub
-        }
-        if (m.createdAt > latestMsgCreatedAt) {
-          latestMsgCreatedAt = m.createdAt
-          result.lastInputTokens = u.inputTokens
+    if (!hasRunUsage && conversationId) {
+      const state = useAppStore.getState()
+      const messageIds = state.messageIdsByConv[conversationId]
+      const messages = state.messages
+      if (messageIds) {
+        // 走 messages 兜底：按 run_id 去重统计 runCount；按 message 累加 token；
+        // model 通过 agent.modelId 推断（messages 不存 model，跑过的模型若已切换无法准确还原）
+        const seenRuns = new Set<string>()
+        let latestMsgCreatedAt = -1
+        for (const mid of messageIds) {
+          const m = messages[mid]
+          if (!m || !m.usage || m.role !== 'agent') continue
+          const u = m.usage
+          result.inputTokens += u.inputTokens
+          result.outputTokens += u.outputTokens
+          result.cacheReadTokens += u.cacheReadTokens
+          if (m.runId && !seenRuns.has(m.runId)) {
+            seenRuns.add(m.runId)
+            result.runCount++
+          }
+          const sub = u.inputTokens + u.outputTokens
+          if (m.agentId) {
+            result.byAgent[m.agentId] = (result.byAgent[m.agentId] ?? 0) + sub
+            const modelId = agents[m.agentId]?.modelId
+            if (modelId) result.byModel[modelId] = (result.byModel[modelId] ?? 0) + sub
+          }
+          if (m.createdAt > latestMsgCreatedAt) {
+            latestMsgCreatedAt = m.createdAt
+            result.lastInputTokens = u.inputTokens
+          }
         }
       }
     }
@@ -1279,5 +1342,5 @@ export const useConversationUsageTotal = (conversationId: string | null): Conver
     result.totalTokens =
       result.inputTokens + result.outputTokens + result.cacheCreationTokens + result.cacheReadTokens
     return result
-  }, [runs, messageIds, messages, agents])
+  }, [conversationId, runs, usageVersion, agents])
 }

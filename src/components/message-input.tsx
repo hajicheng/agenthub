@@ -18,7 +18,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { nanoid } from 'nanoid'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 
 import { AttachmentChip, PendingAttachmentChip } from '@/components/attachment-chip'
 import { QuotedMessage } from '@/components/quoted-message'
@@ -229,7 +229,7 @@ function safeFileName(value: string): string {
   return (cleaned || 'conversation').slice(0, 80)
 }
 
-export function MessageInput({ conversationId }: { conversationId: string }) {
+function MessageInputImpl({ conversationId }: { conversationId: string }) {
   const [content, setContent] = useState('')
   const [slashTrigger, setSlashTrigger] = useState<SlashTrigger | null>(null)
   const [slashHighlight, setSlashHighlight] = useState(0)
@@ -365,7 +365,12 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
   }
 
   const updateInputTriggers = (text: string, cursor: number) => {
-    setSlashTrigger(detectSlashTrigger(text, cursor))
+    const next = detectSlashTrigger(text, cursor)
+    setSlashTrigger((prev) => {
+      if (prev === null && next === null) return prev
+      if (prev && next && prev.start === next.start && prev.query === next.query) return prev
+      return next
+    })
   }
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -727,49 +732,53 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
         </div>
       )}
 
-      <Dialog
-        open={clearHistoryOpen}
-        onOpenChange={(open) => {
-          if (!clearingHistory) setClearHistoryOpen(open)
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="size-4 text-destructive" />
-              清空会话历史？
-            </DialogTitle>
-            <DialogDescription>
-              将删除当前会话的所有历史消息、运行记录和上下文压缩摘要，无法撤销。产物、附件和
-              workspace 文件不会被删除。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={clearingHistory}
-              onClick={() => setClearHistoryOpen(false)}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={clearingHistory || isRunning}
-              onClick={() => void confirmClearHistory()}
-            >
-              {clearingHistory ? '清空中...' : '清空历史'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {clearHistoryOpen && (
+        <Dialog
+          open={clearHistoryOpen}
+          onOpenChange={(open) => {
+            if (!clearingHistory) setClearHistoryOpen(open)
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <AlertTriangle className="size-4 text-destructive" />
+                清空会话历史？
+              </DialogTitle>
+              <DialogDescription>
+                将删除当前会话的所有历史消息、运行记录和上下文压缩摘要，无法撤销。产物、附件和
+                workspace 文件不会被删除。
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={clearingHistory}
+                onClick={() => setClearHistoryOpen(false)}
+              >
+                取消
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={clearingHistory || isRunning}
+                onClick={() => void confirmClearHistory()}
+              >
+                {clearingHistory ? '清空中...' : '清空历史'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
 
-      <SlashCommandHelpDialog
-        open={slashHelpOpen}
-        commands={SLASH_COMMANDS}
-        onOpenChange={setSlashHelpOpen}
-      />
+      {slashHelpOpen && (
+        <SlashCommandHelpDialog
+          open={slashHelpOpen}
+          commands={SLASH_COMMANDS}
+          onOpenChange={setSlashHelpOpen}
+        />
+      )}
 
       <SlashCommandMenu
         commands={slashTrigger ? filteredSlashCommands : []}
@@ -875,3 +884,6 @@ export function MessageInput({ conversationId }: { conversationId: string }) {
     </div>
   )
 }
+
+export const MessageInput = memo(MessageInputImpl)
+MessageInput.displayName = 'MessageInput'

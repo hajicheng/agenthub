@@ -66,6 +66,8 @@ export function GlobalSearch() {
     }
   }
 
+  if (!isOpen) return null
+
   const tooShort = query.trim().length < 2
   const showEmpty = !error && !tooShort && hits.length === 0 && !loading
 

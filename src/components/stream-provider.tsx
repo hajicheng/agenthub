@@ -10,6 +10,7 @@ import {
   fetchPendingQuestions,
   fetchPendingWrites,
 } from '@/lib/api'
+import { createStreamEventBatcher } from '@/lib/stream-batcher'
 import { selectEventsAfterSnapshot, type QueuedStreamEvent } from '@/lib/stream-resync'
 import type { StreamEvent } from '@/shared/types'
 import { useAppStore } from '@/stores/app-store'
@@ -36,7 +37,12 @@ let reconnectAttempt = 0
 let resyncQueue: QueuedStreamEvent[] | null = null
 let resyncGeneration = 0
 
+const eventBatcher = createStreamEventBatcher({
+  onFlush: (events) => useAppStore.getState().applyEvents(events),
+})
+
 async function resyncFromSnapshot(): Promise<void> {
+  eventBatcher.clear()
   const generation = ++resyncGeneration
   resyncQueue = []
   const store = useAppStore.getState()
@@ -64,11 +70,11 @@ async function resyncFromSnapshot(): Promise<void> {
 
   const queued = resyncQueue ?? []
   resyncQueue = null
-  const { applyEvent } = useAppStore.getState()
+  const { applyEvents } = useAppStore.getState()
   const events = snapshotEventId
     ? selectEventsAfterSnapshot(queued, snapshotEventId)
     : queued.map((q) => q.event)
-  for (const event of events) applyEvent(event)
+  applyEvents(events)
 }
 
 async function refreshPendingFor(conversationId: string): Promise<void> {
@@ -131,7 +137,7 @@ function connect(): void {
       resyncQueue.push({ id: e.lastEventId, event: parsed as StreamEvent })
       return
     }
-    useAppStore.getState().applyEvent(parsed as StreamEvent)
+    eventBatcher.push(parsed as StreamEvent)
   }
 }
 
@@ -144,6 +150,7 @@ export function StreamProvider({ children }: { children: React.ReactNode }) {
       refCount--
       // 全部组件都卸载时关闭，避免 dev 模式 StrictMode 双 mount 反复断开
       if (refCount <= 0) {
+        eventBatcher.clear()
         if (reconnectTimer) clearTimeout(reconnectTimer)
         reconnectTimer = null
         activeSource?.close()

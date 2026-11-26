@@ -51,24 +51,23 @@ export function AskUserQuestionDialog({ conversationId }: { conversationId: stri
   }, [conversationId, setPendingQuestionsForConversation])
 
   const current = pending[0] ?? null
-  const agentName = current ? agents[current.agentId]?.name ?? current.agentId : ''
+  if (!current) return null
+  const agentName = agents[current.agentId]?.name ?? current.agentId
 
   return (
-    <Dialog open={current !== null} onOpenChange={() => { /* 必须答完才能关 */ }}>
+    <Dialog open onOpenChange={() => { /* 必须答完才能关 */ }}>
       <DialogContent
         showCloseButton={false}
         className="max-w-[min(720px,calc(100vw-2rem))] sm:max-w-[min(720px,calc(100vw-2rem))] gap-0 p-0"
       >
-        {current && (
-          <AskUserBody
-            conversationId={conversationId}
-            questionId={current.id}
-            agentName={agentName}
-            agentId={current.agentId}
-            questions={current.questions}
-            queueSize={pending.length}
-          />
-        )}
+        <AskUserBody
+          conversationId={conversationId}
+          questionId={current.id}
+          agentName={agentName}
+          agentId={current.agentId}
+          questions={current.questions}
+          queueSize={pending.length}
+        />
       </DialogContent>
     </Dialog>
   )

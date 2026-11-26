@@ -1,10 +1,10 @@
 'use client'
 
 import { CornerUpLeft, Loader2, Pencil, Pin, RotateCcw, Star, Trash2 } from 'lucide-react'
-import { memo, useState } from 'react'
+import dynamic from 'next/dynamic'
+import { memo, useMemo, useState } from 'react'
 
 import { AgentInfoPopover } from '@/components/agent-info-popover'
-import { DispatchPlanCard, getDelegationCall } from '@/components/dispatch-plan-card'
 import { EditMessageInput } from '@/components/edit-message-input'
 import { PartList } from '@/components/message-parts'
 import { QuotedMessage } from '@/components/quoted-message'
@@ -22,23 +22,59 @@ import { editAndResendMessage, regenerateLastResponse, toggleMessagePin, withdra
 import { cn } from '@/lib/utils'
 import type { MessageRow } from '@/db/schema'
 import { PIN_LIMIT_PER_CONVERSATION } from '@/shared/constants'
-import {
-  useAppStore,
-  useDispatchForMessage,
-  useLatestAgentMessageId,
-  useLatestUserMessageId,
-} from '@/stores/app-store'
+import type { MessagePart } from '@/shared/types'
+import { selectDispatchForMessage, useAppStore } from '@/stores/app-store'
 
-function MessageItemImpl({ message }: { message: MessageRow }) {
-  const agentsMap = useAppStore((s) => s.agents)
-  const agent = message.agentId ? agentsMap[message.agentId] : null
-  const dispatch = useDispatchForMessage(message.id)
-  const delegation = getDelegationCall(message.parts)
-  const visibleParts = delegation
-    ? message.parts.filter((part) =>
-        (part.type !== 'tool_use' && part.type !== 'tool_result') || part.callId !== delegation.callId,
-      )
-    : message.parts
+const DispatchPlanCard = dynamic(
+  () => import('@/components/dispatch-plan-card').then((m) => m.DispatchPlanCard),
+  { ssr: false },
+)
+
+const TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' })
+
+function findDelegationCallId(parts: MessagePart[]): string | null {
+  for (const part of parts) {
+    if (part.type !== 'tool_use' || part.toolName !== 'delegate_task') continue
+    const args = part.args
+    if (
+      args !== null &&
+      typeof args === 'object' &&
+      typeof (args as Record<string, unknown>).agentId === 'string' &&
+      ((args as Record<string, unknown>).agentId as string).length > 0 &&
+      typeof (args as Record<string, unknown>).task === 'string' &&
+      ((args as Record<string, unknown>).task as string).length > 0
+    ) {
+      return part.callId
+    }
+  }
+  return null
+}
+
+function MessageItemImpl({
+  message,
+  isLatestUser = false,
+  isLatestAgent = false,
+}: {
+  message: MessageRow
+  isLatestUser?: boolean
+  isLatestAgent?: boolean
+}) {
+  const agent = useAppStore((s) => (message.agentId ? s.agents[message.agentId] : null))
+  const dispatch = useAppStore((s) =>
+    message.role === 'agent' ? selectDispatchForMessage(s, message.id) : null,
+  )
+  const delegationCallId = useMemo(() => findDelegationCallId(message.parts), [message.parts])
+  const visibleParts = useMemo(
+    () =>
+      delegationCallId
+        ? message.parts.filter(
+            (part) =>
+              (part.type !== 'tool_use' && part.type !== 'tool_result') ||
+              part.callId !== delegationCallId,
+          )
+        : message.parts,
+    [delegationCallId, message.parts],
+  )
   const setReplyTarget = useAppStore((s) => s.setReplyTarget)
   const highlightMessage = useAppStore((s) => s.highlightMessage)
   const isHighlighted = useAppStore((s) => s.highlightedMessageId === message.id)
@@ -55,16 +91,14 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
   const parentMessage = useAppStore((s) =>
     message.parentMessageId ? s.messages[message.parentMessageId] : null,
   )
-  const latestUserId = useLatestUserMessageId(message.conversationId)
-  const latestAgentId = useLatestAgentMessageId(message.conversationId)
   const removeMessages = useAppStore((s) => s.removeMessages)
   const removeArtifacts = useAppStore((s) => s.removeArtifacts)
   const upsertMessage = useAppStore((s) => s.upsertMessage)
 
   const isUser = message.role === 'user'
   const name = isUser ? '我' : message.role === 'system' ? '系统' : agent?.name ?? 'Unknown'
-  const isLatestUser = isUser && latestUserId === message.id
-  const isLatestAgent = !isUser && latestAgentId === message.id
+  const showWithdrawAndEdit = isUser && isLatestUser
+  const showRegenerate = !isUser && isLatestAgent && message.status !== 'streaming'
 
   const [editing, setEditing] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -161,7 +195,8 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
       data-role={message.role}
       data-status={message.status}
       className={cn(
-        'group flex items-start gap-3 rounded-lg animate-in fade-in slide-in-from-bottom-1',
+        'group flex items-start gap-3 rounded-lg',
+        message.status === 'streaming' && 'animate-in fade-in slide-in-from-bottom-1',
         isUser && 'flex-row-reverse',
       )}
     >
@@ -255,8 +290,14 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
                 </div>
               )}
 
-              <PartList parts={visibleParts} conversationId={message.conversationId} />
-              <DispatchPlanCard message={message} dispatch={dispatch} />
+              <PartList
+                parts={visibleParts}
+                conversationId={message.conversationId}
+                isStreaming={message.status === 'streaming'}
+              />
+              {(dispatch !== null || delegationCallId !== null) && (
+                <DispatchPlanCard message={message} dispatch={dispatch} />
+              )}
             </>
           )}
         </div>
@@ -297,7 +338,7 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
             >
               <Pin className={cn('size-3.5', isPinned && 'fill-primary')} />
             </button>
-            {isLatestUser && (
+            {showWithdrawAndEdit && (
               <>
                 <button
                   type="button"
@@ -319,7 +360,7 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
                 </button>
               </>
             )}
-            {isLatestAgent && message.status !== 'streaming' && (
+            {showRegenerate && (
               <button
                 type="button"
                 onClick={() => void handleRegenerate()}
@@ -334,32 +375,34 @@ function MessageItemImpl({ message }: { message: MessageRow }) {
         )}
       </div>
 
-      <Dialog
-        open={confirmWithdraw}
-        onOpenChange={(open) => !busy && setConfirmWithdraw(open)}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>撤回这条消息？</DialogTitle>
-            <DialogDescription>
-              你发送的这条消息以及其后所有 Agent 的回复和产物会被一并删除，无法恢复。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmWithdraw(false)} disabled={busy}>
-              取消
-            </Button>
-            <Button
-              variant="default"
-              className="bg-red-600 hover:bg-red-700"
-              onClick={() => void handleWithdraw()}
-              disabled={busy}
-            >
-              {busy ? '撤回中…' : '撤回'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {confirmWithdraw && (
+        <Dialog
+          open={confirmWithdraw}
+          onOpenChange={(open) => !busy && setConfirmWithdraw(open)}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>撤回这条消息？</DialogTitle>
+              <DialogDescription>
+                你发送的这条消息以及其后所有 Agent 的回复和产物会被一并删除，无法恢复。
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setConfirmWithdraw(false)} disabled={busy}>
+                取消
+              </Button>
+              <Button
+                variant="default"
+                className="bg-red-600 hover:bg-red-700"
+                onClick={() => void handleWithdraw()}
+                disabled={busy}
+              >
+                {busy ? '撤回中…' : '撤回'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   )
 }
@@ -368,8 +411,7 @@ export const MessageItem = memo(MessageItemImpl)
 MessageItem.displayName = 'MessageItem'
 
 function formatTime(ts: number): string {
-  const d = new Date(ts)
-  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  return TIME_FORMATTER.format(ts)
 }
 
 function formatTokenShort(n: number): string {

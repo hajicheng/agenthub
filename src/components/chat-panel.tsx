@@ -1,19 +1,14 @@
 'use client'
 
 import { AlertTriangle, FilePenLine, FolderOpen, FolderTree, Layers, Menu, MessagesSquare, UserPlus, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import dynamic from 'next/dynamic'
+import { memo, useEffect, useMemo, useState } from 'react'
 
-import { AddAgentDialog } from '@/components/add-agent-dialog'
 import { AgentInfoPopover } from '@/components/agent-info-popover'
 import { AskUserQuestionDialog } from '@/components/ask-user-question-dialog'
-import { ArtifactLibrary } from '@/components/artifact-library'
 import { ConversationOutline } from '@/components/conversation-outline'
-import { FileLibraryDialog } from '@/components/file-library-dialog'
-import { FileTab } from '@/components/file-tab'
-import { PendingWriteDiffTab } from '@/components/pending-write-diff-tab'
 import { PendingBashCommandsPanel } from '@/components/pending-bash-commands-panel'
-import { PendingWritesPanel } from '@/components/pending-writes-panel'
-import { diffTabPendingId, isDiffTabId } from '@/components/pending-writes-panel'
+import { PendingWritesPanel, diffTabPendingId, isDiffTabId } from '@/components/pending-writes-panel'
 import { PinnedMessagesBar } from '@/components/pinned-messages-bar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -37,6 +32,27 @@ import {
   useOpenFiles,
   usePendingWrites,
 } from '@/stores/app-store'
+
+const AddAgentDialog = dynamic(
+  () => import('@/components/add-agent-dialog').then((m) => m.AddAgentDialog),
+  { ssr: false },
+)
+const ArtifactLibrary = dynamic(
+  () => import('@/components/artifact-library').then((m) => m.ArtifactLibrary),
+  { ssr: false },
+)
+const FileLibraryDialog = dynamic(
+  () => import('@/components/file-library-dialog').then((m) => m.FileLibraryDialog),
+  { ssr: false },
+)
+const FileTab = dynamic(
+  () => import('@/components/file-tab').then((m) => m.FileTab),
+  { ssr: false },
+)
+const PendingWriteDiffTab = dynamic(
+  () => import('@/components/pending-write-diff-tab').then((m) => m.PendingWriteDiffTab),
+  { ssr: false },
+)
 
 export function ChatPanel() {
   const conv = useActiveConversation()
@@ -240,40 +256,46 @@ export function ChatPanel() {
         <FileTab conversationId={conv.id} relPath={activeTab} />
       )}
 
-      <AddAgentDialog
-        open={addOpen}
-        onOpenChange={setAddOpen}
-        conversationId={conv.id}
-        existingAgentIds={conv.agentIds}
-      />
+      {addOpen && (
+        <AddAgentDialog
+          open={addOpen}
+          onOpenChange={setAddOpen}
+          conversationId={conv.id}
+          existingAgentIds={conv.agentIds}
+        />
+      )}
 
-      <FileLibraryDialog
-        open={filesOpen}
-        onOpenChange={setFilesOpen}
-        conversationId={conv.id}
-      />
+      {filesOpen && (
+        <FileLibraryDialog
+          open={filesOpen}
+          onOpenChange={setFilesOpen}
+          conversationId={conv.id}
+        />
+      )}
 
-      <Dialog open={artifactsOpen} onOpenChange={setArtifactsOpen}>
-        <DialogContent className="grid max-h-[min(680px,calc(100vh-2rem))] max-w-md grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
-          <DialogHeader className="border-b px-4 py-3">
-            <DialogTitle className="flex items-center gap-2 text-sm">
-              <Layers className="size-4 text-muted-foreground" />
-              会话产物
-            </DialogTitle>
-            <DialogDescription className="truncate text-xs" title={conv.title}>
-              {conv.title}
-            </DialogDescription>
-          </DialogHeader>
-          <ArtifactLibrary conversationId={conv.id} showConversationTitle={false} />
-        </DialogContent>
-      </Dialog>
+      {artifactsOpen && (
+        <Dialog open={artifactsOpen} onOpenChange={setArtifactsOpen}>
+          <DialogContent className="grid max-h-[min(680px,calc(100vh-2rem))] max-w-md grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
+            <DialogHeader className="border-b px-4 py-3">
+              <DialogTitle className="flex items-center gap-2 text-sm">
+                <Layers className="size-4 text-muted-foreground" />
+                会话产物
+              </DialogTitle>
+              <DialogDescription className="truncate text-xs" title={conv.title}>
+                {conv.title}
+              </DialogDescription>
+            </DialogHeader>
+            <ArtifactLibrary conversationId={conv.id} showConversationTitle={false} />
+          </DialogContent>
+        </Dialog>
+      )}
 
       <AskUserQuestionDialog conversationId={conv.id} />
     </main>
   )
 }
 
-function ParticipantStack({ agents }: { agents: AgentRow[] }) {
+const ParticipantStack = memo(function ParticipantStack({ agents }: { agents: AgentRow[] }) {
   const visibleAgents = agents.slice(0, 3)
   const hiddenAgents = agents.slice(3)
   const title = agents.map((agent) => agent.name).join(' / ')
@@ -298,7 +320,7 @@ function ParticipantStack({ agents }: { agents: AgentRow[] }) {
       )}
     </div>
   )
-}
+})
 
 function TabButton({
   label,

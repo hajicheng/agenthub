@@ -1,7 +1,7 @@
 'use client'
 
 import { Archive, Coins } from 'lucide-react'
-import { useState } from 'react'
+import { memo, useState } from 'react'
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { compactConversation } from '@/lib/api'
@@ -17,27 +17,30 @@ import { useAppStore, useConversationUsageTotal } from '@/stores/app-store'
  *
  * 没用量时不渲染（首次进入会话之前没数据）。
  */
-export function UsageBadge({ conversationId }: { conversationId: string }) {
+function UsageBadgeImpl({ conversationId }: { conversationId: string }) {
   const total = useConversationUsageTotal(conversationId)
   const agents = useAppStore((s) => s.agents)
   const conv = useAppStore((s) => s.conversations[conversationId])
   const upsertMessage = useAppStore((s) => s.upsertMessage)
+  const [open, setOpen] = useState(false)
   const [compacting, setCompacting] = useState(false)
 
   if (total.runCount === 0) return null
 
   // 取本会话内 contextWindow 最大的 agent 作为可见上限。详见 specs/13-conversation-context.md。
-  const contextWindow = (() => {
-    if (!conv) return 0
-    let maxCtx = 0
-    for (const aid of conv.agentIds) {
-      const a = agents[aid]
-      if (!a) continue
-      const limits = getModelLimits(a.modelProvider, a.modelId)
-      if (limits.contextWindow > maxCtx) maxCtx = limits.contextWindow
-    }
-    return maxCtx
-  })()
+  const contextWindow = open
+    ? (() => {
+        if (!conv) return 0
+        let maxCtx = 0
+        for (const aid of conv.agentIds) {
+          const a = agents[aid]
+          if (!a) continue
+          const limits = getModelLimits(a.modelProvider, a.modelId)
+          if (limits.contextWindow > maxCtx) maxCtx = limits.contextWindow
+        }
+        return maxCtx
+      })()
+    : 0
 
   const handleCompact = async () => {
     if (compacting) return
@@ -53,7 +56,7 @@ export function UsageBadge({ conversationId }: { conversationId: string }) {
   }
 
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         className={cn(
           'inline-flex shrink-0 items-center gap-1 rounded-md border bg-muted/30 px-2 py-1 font-mono text-[10px] text-muted-foreground transition hover:border-foreground/30 hover:bg-muted hover:text-foreground',
@@ -63,7 +66,8 @@ export function UsageBadge({ conversationId }: { conversationId: string }) {
         <Coins className="size-3" />
         <span>{formatTok(total.totalTokens)}</span>
       </PopoverTrigger>
-      <PopoverContent className="w-80 p-3 text-xs" align="end">
+      {open && (
+        <PopoverContent className="w-80 p-3 text-xs" align="end">
         <div className="mb-2 flex items-baseline justify-between border-b pb-2">
           <span className="font-medium">本会话 token 累计</span>
           <span className="text-[10px] text-muted-foreground">{total.runCount} 次响应</span>
@@ -169,10 +173,14 @@ export function UsageBadge({ conversationId }: { conversationId: string }) {
               ))}
           </div>
         )}
-      </PopoverContent>
+        </PopoverContent>
+      )}
     </Popover>
   )
 }
+
+export const UsageBadge = memo(UsageBadgeImpl)
+UsageBadge.displayName = 'UsageBadge'
 
 function Row({
   label,
